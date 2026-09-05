@@ -1,0 +1,74 @@
+"""DingTalk transport; delivery is separate from the trading thread."""
+import base64
+import hashlib
+import hmac
+import os
+import time
+from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import requests
+from dotenv import dotenv_values
+
+
+def notification_config(root):
+    path = Path(os.getenv("DINGTALK_ENV_FILE", "../binance-copy-monitor/.env"))
+    if not path.is_absolute():
+        path = root / path
+    # Import only robot credentials. Never import the old trading/HTTP settings.
+    previous = dotenv_values(path) if path.is_file() else {}
+    return {"enabled": os.getenv("DINGTALK_ENABLED", "true").lower() == "true",
+            "webhook": os.getenv("DINGTALK_WEBHOOK") or previous.get("DINGTALK_WEBHOOK") or "",
+            "secret": os.getenv("DINGTALK_SECRET") or previous.get("DINGTALK_SECRET") or ""}
+
+
+class DingTalk:
+    def __init__(self, config):
+        self.config = config
+        self.webhook = config.get("webhook", "").strip()
+        self.secret = config.get("secret", "").strip()
+
+    @property
+    def enabled(self):
+        return bool(self.config.get("enabled") and self.webhook)
+
+    def signed_url(self):
+        parts = urlsplit(self.webhook)
+        if parts.scheme != "https" or parts.netloc != "oapi.dingtalk.com" or parts.path != "/robot/send":
+            raise ValueError("钉钉Webhook格式无效，仅支持官方群机器人地址")
+        query = dict(parse_qsl(parts.query))
+        if not query.get("access_token"):
+            raise ValueError("钉钉Webhook缺少access_token")
+        if self.secret:
+            timestamp = str(int(time.time() * 1000))
+            sign = base64.b64encode(hmac.new(self.secret.encode(),
+                f"{timestamp}\n{self.secret}".encode(), hashlib.sha256).digest()).decode()
+            query.update(timestamp=timestamp, sign=sign)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+    def send(self, item):
+        try:
+            r = requests.post(self.signed_url(), json={"msgtype": "text", "text": {"content": item["text"]},
+                              "at": {"isAtAll": False}}, timeout=(5, 10), allow_redirects=False)
+            if r.status_code != 200:
+                raise ValueError(f"钉钉响应HTTP {r.status_code}")
+            body = r.json()
+            if body.get("errcode") != 0:
+                raise ValueError(f"钉钉拒绝通知，错误码 {body.get('errcode')}")
+        except requests.RequestException:
+            raise ValueError("钉钉网络请求失败，通知等待重试") from None
+
+
+def message(mode, kind, event, note, mode_capital):
+    labels = {"paper":"模拟", "testnet":"测试网", "live":"实盘"}
+    lines = [f"CopyCat · 熬鹰跟单 · {labels.get(mode, mode)} · {kind}",
+             f"时间：{event.get('time') or event.get('occurred_at') or '—'}",
+             f"合约：{event.get('symbol') or '系统'} / {event.get('side') or '—'}",
+             f"操作：{event.get('operation') or '—'}；本金：{mode_capital} USDT"]
+    for key, label in (("quantity","本次成交数量"),("price","成交价格"),("client_id","订单编号"),
+                       ("order_type","订单类型"),("limit_price","委托限价"),
+                       ("exchange_status","交易所状态"),("realized_pnl","本次平仓毛盈亏USDT")):
+        if event.get(key) is not None:
+            lines.append(f"{label}：{event[key]}")
+    lines.append(f"说明：{note}")
+    return "\n".join(lines)
