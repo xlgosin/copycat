@@ -83,7 +83,32 @@ class Engine:
             self.s["review_required"] = "旧账本缺少已验证源仓位基线，请核对并归档旧账本后重新初始化"
             self.s["error"] = self.s["review_required"]
         self.source = {}
+        self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
+                        "updated": None, "error": None, "mismatch": False, "label": "U本位"}
+        self.refresh_account()
         self.save()
+
+    def refresh_account(self):
+        try:
+            if self.c["mode"] == "paper":
+                capital = str(self.c["capital"])
+                self.account = {"available": capital, "margin_balance": capital, "wallet_balance": capital,
+                                "updated": stamp(), "error": None, "mismatch": False, "label": "模拟"}
+                return
+            if not (self.c["key"] and self.c["secret"]):
+                self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
+                                "updated": stamp(), "error": "未配置API凭据", "mismatch": False, "label": "U本位"}
+                return
+            balances = self.exchange.account_balances()
+            margin = dec(balances.get("margin_balance") or 0)
+            mismatch = abs(margin - self.c["capital"]) > dec(5)
+            self.account = {"available": str(dec(balances.get("available") or 0)),
+                            "margin_balance": str(margin),
+                            "wallet_balance": str(dec(balances.get("wallet_balance") or 0)),
+                            "updated": stamp(), "error": None, "mismatch": mismatch, "label": "U本位"}
+        except Exception as exc:
+            self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
+                            "updated": stamp(), "error": str(exc)[:160], "mismatch": False, "label": "U本位"}
 
     @contextmanager
     def connection(self):
@@ -452,6 +477,7 @@ class Engine:
                         break
                 self.s["last_poll"] = stamp()
                 self.s["coverage_end"] = status.get("history_window_end", self.s.get("coverage_end"))
+                self.refresh_account()
                 self.save()
             except Exception as exc:
                 if self.storage_error:
@@ -623,6 +649,7 @@ class Engine:
         return {"mode": self.c["mode"], "capital": str(self.c["capital"]), "multiplier": str(self.c["multiplier"]),
             "opening_order": "LIMIT IOC · 熬鹰成交均价", "closing_order": "MARKET reduceOnly",
             "max_gross": str(self.c["max_gross"]), "leverage": self.c["leverage"], "source": self.source,
+            "account": self.account,
             "running": self.s["running"], "error": self.s["error"], "positions": self.s["positions"],
             "records": self.s["records"][:100], "pending": bool(self.s["pending"]),
             "last_poll": self.s.get("last_poll"), "realized": self.s["realized"],

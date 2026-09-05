@@ -101,6 +101,12 @@ class Binance:
     def positions(self):
         return self.request("GET", "/fapi/v2/positionRisk", signed=True)
 
+    def account_balances(self):
+        account = self.request("GET", "/fapi/v2/account", signed=True)
+        return {"available": account.get("availableBalance"),
+                "margin_balance": account.get("totalMarginBalance"),
+                "wallet_balance": account.get("totalWalletBalance")}
+
     def validate_account(self):
         if self.request("GET", "/fapi/v1/positionSide/dual", signed=True)["dualSidePosition"]:
             raise ValueError("本版要求单向持仓模式，请使用独立账户并自行设置")

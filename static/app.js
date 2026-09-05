@@ -1,4 +1,4 @@
-let token = '', state = null, busy = false, actionBusy = false, historyBusy = false, historyPage = null;
+let token = localStorage.getItem('copycat_admin_token') || '', state = null, busy = false, actionBusy = false, historyBusy = false, historyPage = null;
 const $ = id => document.getElementById(id);
 const number = (n, digits=2) => n == null ? '—' : Number(n).toLocaleString('zh-CN',{maximumFractionDigits:digits});
 const escape = x => String(x ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -9,6 +9,7 @@ async function api(path, body){
   try {
     const response = await fetch('/api/'+path,{signal:controller.signal,method:body===undefined?'GET':'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});
     const data = await response.json();
+    if(response.status===401){localStorage.removeItem('copycat_admin_token');token='';$('login').hidden=false;$('dashboard').hidden=true}
     if(!response.ok) throw Error(data.error || '请求失败');
     return data;
   } catch(e) {
@@ -23,12 +24,15 @@ function render(s){
   $('running').textContent=s.stop_requested&&s.executor_busy?'已请求暂停 · 等待当前处理完成':s.running?'自动跟单中':'已暂停';
   $('updated').textContent='源数据 '+date(s.source.updated);
   $('equity').textContent=number(s.source.equity); $('capital').textContent=number(s.capital);
+  const account=s.account||{};
+  if(account.error){$('wallet').textContent='—';$('walletHint').textContent=account.error}
+  else{$('wallet').textContent=number(account.margin_balance);$('walletHint').textContent=(account.label||'U本位')+'权益 '+number(account.margin_balance)+' · 可用 '+number(account.available)+(account.mismatch?' · 与本金差超过5U':'')}
   $('multiple').textContent=s.multiplier+'×'; $('cap').textContent=number(s.max_gross);
   $('ratio').textContent=Number(s.source.equity)>0?'数量比例 '+number(Number(s.capital)*Number(s.multiplier)/Number(s.source.equity)*100,5)+'%':'等待带单余额';
   $('credentials').textContent=(s.credentials_configured?'API凭据已配置':'未配置API凭据，模拟模式无需密钥')+' · 本服务更新 '+date(s.last_poll);
   const ding=s.dingtalk||{};
   $('credentials').textContent+=' · 钉钉'+(ding.enabled?'已启用':'未配置/未启用')+(ding.pending?'，待发 '+ding.pending+' 条':'')+(ding.error?'，'+ding.error:'');
-  const warning=s.error || (s.source_stale?'源数据已过期，请先启动网页采集；当前金额仅为历史快照。':'');
+  const warning=s.error || (s.source_stale?'源数据已过期，请先启动网页采集；当前金额仅为历史快照。':'') || (account.mismatch?`合约账户权益 ${number(account.margin_balance)} USDT 与配置本金 ${number(s.capital)} 相差超过5U，请划转至接近预算后再开仓。`:'');
   $('error').hidden=!warning; $('error').textContent=warning; $('resolve').hidden=!s.pending;
   $('pnl').textContent='累计平仓毛盈亏 '+number(s.realized)+' USDT';
   $('aum').textContent='源资产管理规模（仅展示）：'+number(s.source.aum)+' USDT';
@@ -40,7 +44,7 @@ function render(s){
   $('older').disabled=historyBusy || Boolean(historyPage&&!historyPage.next_before);
   $('latest').hidden=!historyPage;
 }
-async function refresh(){if(!token||busy)return;busy=true;try{render(await api('status'));$('connection').textContent='已连接'}catch(e){$('connection').textContent='连接异常：'+e.message;if(state)$('running').textContent='连接中断 · 运行状态未知';else $('message').textContent=e.message}finally{busy=false}}
+async function refresh(){if(!token||busy)return;busy=true;try{render(await api('status'));localStorage.setItem('copycat_admin_token',token);$('connection').textContent='已连接'}catch(e){$('connection').textContent='连接异常：'+e.message;if(state)$('running').textContent='连接中断 · 运行状态未知';else $('message').textContent=e.message}finally{busy=false}}
 $('loginForm').addEventListener('submit',e=>{e.preventDefault();token=$('token').value.trim();$('token').value='';refresh()});
 for(const button of document.querySelectorAll('.tab'))button.addEventListener('click',()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===button));document.querySelectorAll('.panel').forEach(x=>x.hidden=x.id!==button.dataset.tab)});
 async function action(path,body={}){
@@ -67,3 +71,4 @@ $('older').addEventListener('click',async()=>{
 });
 $('latest').addEventListener('click',()=>{historyPage=null;if(state)render(state);refresh()});
 setInterval(refresh,5000);
+if(token) refresh();
