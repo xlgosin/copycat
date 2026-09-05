@@ -1,5 +1,6 @@
 import fcntl
 import hmac
+import logging
 import os
 import secrets
 import threading
@@ -11,6 +12,19 @@ from flask import Flask, jsonify, render_template, request
 from core import Engine, ROOT
 from exchange import dec
 from notifications import notification_config
+
+
+def run_worker(engine, action, interval, trading=False):
+    while True:
+        try:
+            action()
+        except Exception:
+            logging.exception("CopyCat 后台任务异常退出")
+            if trading:
+                engine.worker_error = "交易工作线程异常退出，请检查服务日志并重启"
+                engine.stop()
+            return
+        threading.Event().wait(interval)
 
 
 def settings():
@@ -70,9 +84,20 @@ def create_app(engine, token):
     def status():
         return jsonify(engine.view())
 
+    @app.get("/api/records")
+    def records():
+        try:
+            before = int(request.args["before"]) if "before" in request.args else None
+            return jsonify(engine.history(before, int(request.args.get("limit", 100))))
+        except (ValueError, OverflowError):
+            return jsonify(error="分页参数无效"), 400
+
     @app.post("/api/start")
     def start():
-        if engine.c["mode"] == "live" and (request.get_json(silent=True) or {}).get("confirmation") != "启动100U实盘跟单":
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify(error="请求内容必须为 JSON 对象"), 400
+        if engine.c["mode"] == "live" and body.get("confirmation") != "启动100U实盘跟单":
             return jsonify(error="启动实盘需要输入：启动100U实盘跟单"), 400
         try:
             engine.start()
@@ -119,16 +144,8 @@ if __name__ == "__main__":
     if len(token) < 24:
         raise SystemExit("ADMIN_TOKEN 至少24位")
     engine = Engine(c)
-    def worker():
-        while True:
-            engine.tick()
-            threading.Event().wait(c["poll"])
-    threading.Thread(target=worker, daemon=True).start()
-    def notifications_worker():
-        while True:
-            engine.deliver_notification()
-            threading.Event().wait(4)
-    threading.Thread(target=notifications_worker, daemon=True).start()
+    threading.Thread(target=run_worker, args=(engine, engine.tick, c["poll"], True), daemon=True).start()
+    threading.Thread(target=run_worker, args=(engine, engine.deliver_notification, 4), daemon=True).start()
     host, port = os.getenv("HOST", "127.0.0.1"), int(os.getenv("PORT", "8010"))
     print(f"CopyCat: http://{host}:{port} | 模式: {c['mode']} | 默认暂停", flush=True)
     print(f"控制口令: {token}", flush=True)

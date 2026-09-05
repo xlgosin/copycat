@@ -1,9 +1,11 @@
 import hashlib
+import copy
 import json
 import os
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,10 +32,24 @@ class Engine:
         self.notification_lock = threading.Lock()
         self.exchange = exchange or Binance(config["mode"], config["key"], config["secret"], config["testnet"])
         self.lock = threading.RLock()
+        self.control_lock = threading.Lock()
+        self.stop_requested = threading.Event()
+        self.stop_requested.set()
+        self.stop_generation = 0
+        self.submitting = False
+        self.worker_error = None
+        self.storage_error = None
+        self.snapshot = None
+        self.new_records = []
+        self.new_seen = set()
+        self.notification_cache = {}
         self.db = Path(config["db"])
         self.db.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as con:
             con.execute("CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY, body TEXT NOT NULL)")
+            con.execute("CREATE TABLE IF NOT EXISTS processed_events (event_id TEXT PRIMARY KEY)")
+            con.execute("CREATE TABLE IF NOT EXISTS records (seq INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT UNIQUE NOT NULL, body TEXT NOT NULL)")
+            con.execute("CREATE TABLE IF NOT EXISTS notification_queue (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, body TEXT NOT NULL)")
             row = con.execute("SELECT body FROM state WHERE id=1").fetchone()
         self.s = json.loads(row[0]) if row else {"initialized": False, "seen": [], "source_positions": {},
             "positions": {}, "records": [], "pending": None, "realized": 0, "fees": 0,
@@ -43,12 +59,28 @@ class Engine:
         if self.s.get("identity") and self.s["identity"] != identity:
             raise ValueError("配置/账户身份与现有账本不同。先核对并平完旧仓位，归档 data 中对应模式数据库后再变更")
         self.s["identity"] = identity
+        # Migrate the old bounded history once, in the same transaction as state.
+        self.new_seen.update(self.s.pop("seen", []))
+        legacy_records = self.s.pop("records", [])
+        for item in reversed(legacy_records):
+            self.new_records.append({**item, "record_id": uuid.uuid4().hex})
+        with self.connection() as con:
+            records = [json.loads(r[0]) for r in con.execute("SELECT body FROM records ORDER BY seq DESC LIMIT 100")]
+            queue = [json.loads(r[0]) for r in con.execute("SELECT body FROM notification_queue ORDER BY seq")]
+        if "notifications" not in self.s:
+            self.s["notifications"] = queue
+        self.notification_cache = {item["id"]: json.dumps(item) for item in queue}
+        self.s["records"] = legacy_records[:100] if legacy_records else records
+        self.s["realized"] = str(dec(self.s["realized"]))
         if self.s.get("processing") and not self.s.get("pending"):
             self.s["review_required"] = "上次进程在处理信号时中断，请人工核对后归档账本重新初始化"
         self.s.update(running=False, error=None)
         if self.s.get("pending"):
             self.s["error"] = "重启发现待确认订单，请核对订单后继续"
         if self.s.get("review_required"):
+            self.s["error"] = self.s["review_required"]
+        if self.s["initialized"] and not self.s.get("baseline_verified"):
+            self.s["review_required"] = "旧账本缺少已验证源仓位基线，请核对并归档旧账本后重新初始化"
             self.s["error"] = self.s["review_required"]
         self.source = {}
         self.save()
@@ -63,6 +95,10 @@ class Engine:
             con.close()
 
     def save(self):
+        if self.storage_error:
+            raise RuntimeError(self.storage_error)
+        if self.stop_requested.is_set():
+            self.s["running"] = False
         error = self.s.get("error")
         if error and error != self.s.get("last_notified_error"):
             self.enqueue_notification("异常暂停", {"time": stamp()}, error)
@@ -75,8 +111,40 @@ class Engine:
             event.pop("price", None)
             self.enqueue_notification("待确认订单", event, f"{error}；请求数量 {pending['quantity']}，尚未确认成交，请点击核对订单")
             self.s["last_notified_pending"] = pending["client_id"]
+        try:
+            with self.connection() as con:
+                con.executemany("INSERT OR IGNORE INTO processed_events VALUES(?)", [(e,) for e in self.new_seen])
+                con.executemany("INSERT OR IGNORE INTO records(record_id,body) VALUES(?,?)",
+                                [(r["record_id"], json.dumps(r)) for r in self.new_records])
+                notifications = {item["id"]: json.dumps(item) for item in self.s.get("notifications", [])}
+                con.executemany("INSERT INTO notification_queue(id,body) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
+                                [(key, value) for key, value in notifications.items() if self.notification_cache.get(key) != value])
+                con.executemany("DELETE FROM notification_queue WHERE id=?",
+                                [(key,) for key in self.notification_cache.keys() - notifications.keys()])
+                body = {k: v for k, v in self.s.items() if k not in ("records", "notifications")}
+                con.execute("INSERT OR REPLACE INTO state VALUES(1,?)", (json.dumps(body),))
+        except Exception:
+            self.storage_error = "账本写入失败，执行已锁定；请恢复存储后重启并核对待确认订单"
+            self.stop_requested.set()
+            raise
+        self.new_records.clear()
+        self.new_seen.clear()
+        self.notification_cache = notifications
+        self.snapshot = copy.deepcopy(self._view())
+
+    def has_seen(self, event_id):
+        if event_id in self.new_seen:
+            return True
         with self.connection() as con:
-            con.execute("INSERT OR REPLACE INTO state VALUES(1,?)", (json.dumps(self.s),))
+            return con.execute("SELECT 1 FROM processed_events WHERE event_id=?", (event_id,)).fetchone() is not None
+
+    def history(self, before=None, limit=100):
+        limit = max(1, min(int(limit), 100))
+        with self.connection() as con:
+            rows = con.execute("SELECT seq,body FROM records WHERE seq < ? ORDER BY seq DESC LIMIT ?",
+                               (before if before is not None else 9223372036854775807, limit + 1)).fetchall()
+        return {"records": [json.loads(r[1]) for r in rows[:limit]],
+                "next_before": rows[limit-1][0] if len(rows) > limit else None}
 
     def enqueue_notification(self, kind, event, note):
         if not self.notifier.enabled:
@@ -89,14 +157,18 @@ class Engine:
 
     def report_error(self, error):
         with self.lock:
+            if self.storage_error:
+                return
             self.s.update(running=False, error=error)
             self.save()
 
     def deliver_notification(self):
-        if not self.notifier.enabled or not self.notification_lock.acquire(blocking=False):
+        if self.storage_error or not self.notifier.enabled or not self.notification_lock.acquire(blocking=False):
             return
         try:
             with self.lock:
+                if self.storage_error:
+                    return
                 queue = self.s.get("notifications", [])
                 if not queue or queue[0]["next_try"] > time.time():
                     return
@@ -108,6 +180,8 @@ class Engine:
                 # Never leak a webhook/signature or propagate a notification error into trading.
                 error = str(exc) if isinstance(exc, ValueError) else "钉钉发送失败，等待重试"
             with self.lock:
+                if self.storage_error:
+                    return
                 queue = self.s.get("notifications", [])
                 if not queue or queue[0]["id"] != item["id"]:
                     return
@@ -129,13 +203,17 @@ class Engine:
         con = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
         con.row_factory = sqlite3.Row
         try:
+            # Legacy collectors need no schema changes. The indexed anti-join also
+            # finds late insertions with old timestamps instead of losing them.
+            con.execute("ATTACH DATABASE ? AS ledger", (self.db.resolve().as_uri() + "?mode=ro",))
             con.execute("BEGIN")
             row = con.execute("SELECT data_json,updated_at FROM trader_state WHERE portfolio_id=?",
                               (self.c["portfolio"],)).fetchone()
             if not row:
                 raise ValueError("爬虫尚未采集到熬鹰账户，请先在原项目后台配置该交易员")
             profile = json.loads(row["data_json"])
-            events = [dict(r) for r in con.execute("SELECT * FROM trade_events WHERE portfolio_id=? ORDER BY occurred_at,event_id",
+            events = [dict(r) for r in con.execute("SELECT e.* FROM trade_events e WHERE portfolio_id=? AND NOT EXISTS "
+                                                   "(SELECT 1 FROM ledger.processed_events p WHERE p.event_id=e.event_id) ORDER BY occurred_at,event_id",
                                                    (self.c["portfolio"],))]
             status = con.execute("SELECT value_json FROM runtime_state WHERE key=?",
                                  ("collector_status:" + self.c["portfolio"],)).fetchone()
@@ -145,16 +223,17 @@ class Engine:
             con.close()
 
     def record(self, event, status, note, **extra):
-        self.s["records"].insert(0, {"time": stamp(), "event_id": event.get("event_id"),
+        self.s["records"].insert(0, {"record_id": uuid.uuid4().hex, "time": stamp(), "event_id": event.get("event_id"),
              "symbol": event.get("symbol"), "side": event.get("side"),
              "operation": event.get("operation"), "status": status, "note": note, **extra})
-        self.s["records"] = self.s["records"][:1000]
+        self.new_records.append(self.s["records"][0])
+        self.s["records"] = self.s["records"][:100]
         kind = ("开仓成交" if event.get("operation") == "OPEN" else "平仓成交") if status == "filled" else "跳过订单"
         if status in ("filled", "skipped", "rejected"):
             self.enqueue_notification(kind, self.s["records"][0], note)
 
     def consume(self, e):
-        self.s["seen"].append(e["event_id"])
+        self.new_seen.add(e["event_id"])
         self.s["last_event_time"] = max(self.s["last_event_time"], e["occurred_at"])
 
     def source_step(self, e):
@@ -165,7 +244,10 @@ class Engine:
         if quantity <= 0:
             raise ValueError("信号数量无效")
         before = dec(self.s["source_positions"].get(key, 0))
-        after = before + quantity if e["operation"] == "OPEN" else max(dec(0), before - quantity)
+        if e["operation"] == "CLOSE" and quantity > before:
+            self.s["review_required"] = "源平仓数量超过已知仓位，历史不完整；请核对源仓位基线"
+            raise ValueError(self.s["review_required"])
+        after = before + quantity if e["operation"] == "OPEN" else before - quantity
         self.s["source_positions"][key] = str(after)
         return key, before, after
 
@@ -179,6 +261,42 @@ class Engine:
         if equity <= 0:
             raise ValueError("无法获取有效的带单保证金余额，不能计算跟单比例")
         return equity
+
+    def establish_baseline(self, profile, events, status):
+        self.check_source(profile, status)
+        baseline = profile.get("position_baseline")
+        positions, cutoff = {}, None
+        if baseline:
+            if baseline.get("portfolio_id") != self.c["portfolio"]:
+                raise ValueError("源仓位基线的交易员ID不匹配")
+            cutoff = datetime.fromisoformat(baseline["as_of"].replace("Z", "+00:00"))
+            if cutoff.tzinfo is None or cutoff.timestamp() > time.time():
+                raise ValueError("源仓位基线时间无效")
+            start = status.get("history_window_start")
+            if not start or datetime.fromisoformat(start) > cutoff:
+                raise ValueError("采集窗口未覆盖源仓位基线时间")
+            positions = {k: str(dec(v)) for k, v in baseline["positions"].items()}
+            if any(k.rsplit(":", 1)[-1] not in ("LONG", "SHORT") or dec(v) < 0 for k, v in positions.items()):
+                raise ValueError("源仓位基线数量/方向无效")
+        elif status.get("history_complete") is not True:
+            raise ValueError("源历史完整性未知：需要完整历史声明或经核实的源仓位基线，暂不允许跟单")
+        previous = self.s["source_positions"]
+        self.s["source_positions"] = positions
+        try:
+            for e in events:
+                if cutoff is None or datetime.fromisoformat(e["occurred_at"]) > cutoff:
+                    self.source_step(e)
+        except Exception:
+            self.s["source_positions"] = previous
+            raise
+        for e in events:
+            self.consume(e)
+        if cutoff is not None:
+            self.s["baseline_as_of"] = cutoff.astimezone(timezone.utc).isoformat()
+            self.s["last_event_time"] = max(self.s["last_event_time"], self.s["baseline_as_of"])
+        self.s["blocked_cycles"] = [k for k, v in positions.items() if dec(v) > 0]
+        self.s.update(initialized=True, baseline_verified=True)
+        self.record({}, "baseline", "已验证源仓位基线；历史订单不追单，已有仓位等待新周期")
 
     def reconcile(self):
         if self.c["mode"] == "paper":
@@ -199,15 +317,27 @@ class Engine:
             raise ValueError("账户有条件委托，停止跟单")
 
     def start(self):
+        with self.control_lock:
+            generation = self.stop_generation
         with self.lock:
+            if self.storage_error:
+                raise ValueError(self.storage_error)
+            if self.worker_error:
+                raise ValueError(self.worker_error)
             if self.s.get("review_required"):
                 raise ValueError(self.s["review_required"])
             if self.s["pending"]:
                 raise ValueError("有结果待确认的订单，请先点击核对订单")
+            if self.s["running"] and not self.stop_requested.is_set():
+                return
+            self.s.update(running=False, error=None)
+            # Drain the snapshot while paused, including closes missed since the
+            # last poll. Only signals arriving after this snapshot can be copied.
+            self.tick()
+            if self.s.get("review_required") or self.s.get("error"):
+                raise ValueError(self.s.get("review_required") or self.s["error"])
             if not self.s["initialized"]:
-                self.tick()
-                if not self.s["initialized"]:
-                    raise ValueError("信号初始化失败，请检查源数据库")
+                raise ValueError("信号初始化失败，请检查源数据库")
             profile, _, status = self.read_source()
             self.check_source(profile, status)
             if self.c["mode"] != "paper":
@@ -217,30 +347,43 @@ class Engine:
                 if dec(account["totalMarginBalance"]) > self.c["capital"] + dec(5):
                     raise ValueError("请使用约100 USDT的独立合约账户；当前账户余额超出预算范围")
                 self.reconcile()
-            self.s.update(running=True, error=None)
+            with self.control_lock:
+                if generation != self.stop_generation:
+                    raise ValueError("启动期间收到暂停请求，保持暂停")
+                self.stop_requested.clear()
+                self.s.update(running=True, error=None, resume_at=stamp())
             self.save()
 
     def stop(self):
-        with self.lock:
+        with self.control_lock:
+            self.stop_generation += 1
+            self.stop_requested.set()
+        # Do not wait for HTTP I/O. The executor persists this flag on its next
+        # save; a process restart is always paused even if it exits beforehand.
+        if self.lock.acquire(blocking=False):
+            try:
+                self.s["running"] = False
+                if not self.storage_error:
+                    self.save()
+            finally:
+                self.lock.release()
+
+    def check_stopped(self):
+        if self.stop_requested.is_set():
             self.s["running"] = False
-            self.save()
+            raise ValueError("已暂停，未提交此订单")
 
     def tick(self):
         with self.lock:
+            if self.storage_error:
+                return
             try:
                 profile, events, status = self.read_source()
                 self.source = {"name": profile.get("name", "熬鹰资本"), "equity": profile.get("margin_balance"),
                                "aum": profile.get("aum"), "updated": status.get("last_success_at"), "count": len(events)}
                 if not self.s["initialized"]:
-                    for e in events:
-                        try:
-                            self.source_step(e)
-                        except (ValueError, TypeError, KeyError):
-                            pass
-                        self.consume(e)
-                    self.s["blocked_cycles"] = [k for k,v in self.s["source_positions"].items() if dec(v)>0]
-                    self.s["initialized"] = True
-                    self.record({}, "baseline", "历史订单仅建立基线，不追单；已有仓位等待新周期")
+                    self.establish_baseline(profile, events, status)
+                    self.s["coverage_end"] = status.get("history_window_end")
                     self.save()
                     return
                 if self.s["pending"]:
@@ -248,14 +391,22 @@ class Engine:
                 if self.s.get("review_required"):
                     self.s.update(running=False, error=self.s["review_required"])
                     return
+                if self.stop_requested.is_set():
+                    self.s["running"] = False
+                if (status.get("history_window_start") and self.s.get("coverage_end") and
+                        datetime.fromisoformat(status["history_window_start"]) > datetime.fromisoformat(self.s["coverage_end"])):
+                    self.s["review_required"] = "源采集窗口存在缺口，请核对遗漏成交与源仓位"
+                    raise ValueError(self.s["review_required"])
                 if self.s["running"]:
                     equity = self.check_source(profile, status)
                     self.reconcile()
                 else:
                     equity = dec(profile.get("margin_balance") or 0)
-                seen = set(self.s["seen"])
                 for e in events:
-                    if e["event_id"] in seen:
+                    if self.has_seen(e["event_id"]):
+                        continue
+                    if self.s.get("baseline_as_of") and datetime.fromisoformat(e["occurred_at"]) <= datetime.fromisoformat(self.s["baseline_as_of"]):
+                        self.consume(e)
                         continue
                     if e["occurred_at"] < self.s["last_event_time"]:
                         self.consume(e)
@@ -270,10 +421,15 @@ class Engine:
                     self.s["processing"] = e["event_id"]
                     self.save()
                     try:
-                        if not self.s["running"]:
+                        if self.stop_requested.is_set():
+                            self.s["running"] = False
+                        pre_resume = self.s.get("resume_at") and datetime.fromisoformat(e["occurred_at"]) <= datetime.fromisoformat(self.s["resume_at"])
+                        if not self.s["running"] or pre_resume:
+                            if after > 0 and dec(self.s["positions"].get(key, {}).get("quantity", 0)) == 0 and key not in self.s["blocked_cycles"]:
+                                self.s["blocked_cycles"].append(key)
                             if key in self.s["blocked_cycles"] and after == 0:
                                 self.s["blocked_cycles"].remove(key)
-                            raise ValueError("已暂停，此信号不追单；已有跟单仓位须自行管理")
+                            raise ValueError("暂停期间/恢复前的信号不追单；已有跟单仓位须自行管理")
                         if not -10 <= age(e["occurred_at"]) <= self.c["signal_age"]:
                             raise ValueError("信号已过期，停止跟单以免漏平仓/追历史订单")
                         if key in self.s["blocked_cycles"]:
@@ -283,6 +439,8 @@ class Engine:
                         self.execute(e, key, before, equity)
                     except ValueError as exc:
                         self.record(e, "skipped", str(exc))
+                        if self.stop_requested.is_set() and after > 0 and dec(self.s["positions"].get(key, {}).get("quantity", 0)) == 0 and key not in self.s["blocked_cycles"]:
+                            self.s["blocked_cycles"].append(key)
                         if dec(self.s["positions"].get(key, {}).get("quantity", 0)) > 0 and e["operation"] == "CLOSE":
                             self.s["review_required"] = "未能执行源平仓信号，请在币安人工核对持仓并归档账本后重新初始化"
                             self.s.update(running=False, error=self.s["review_required"])
@@ -293,14 +451,18 @@ class Engine:
                     if self.s["pending"] or self.s.get("error"):
                         break
                 self.s["last_poll"] = stamp()
+                self.s["coverage_end"] = status.get("history_window_end", self.s.get("coverage_end"))
                 self.save()
             except Exception as exc:
+                if self.storage_error:
+                    return
                 self.s.update(running=False, error=str(exc))
                 if self.s.get("processing") and not self.s.get("pending"):
                     self.s["review_required"] = "信号执行中断，请人工核对源记录和本系统持仓后归档账本重新初始化"
                 self.save()
 
     def execute(self, e, key, source_before, equity):
+        self.check_stopped()
         opening = e["operation"] == "OPEN"
         own = self.s["positions"].get(key, {"quantity": "0", "entry": "0"})
         if not opening and dec(own["quantity"]) == 0:
@@ -336,18 +498,33 @@ class Engine:
                 available = min(dec(account["availableBalance"]), self.c["capital"])
                 if quantity * risk_price / self.c["leverage"] + quantity * risk_price * dec("0.002") > available:
                     raise ValueError("可用保证金不足（已预留费用）")
+                self.check_stopped()
                 self.exchange.prepare(e["symbol"], self.c["leverage"])
         pending = {"event": e, "key": key, "symbol": e["symbol"], "operation": e["operation"],
             "quantity": str(quantity), "price": str(price),
             "order_side": order_side, "order_type": "LIMIT" if opening else "MARKET",
             "limit_price": str(limit_price) if opening else None, "time_in_force": "IOC" if opening else None,
             "client_id": "cc_" + hashlib.sha256((self.c["mode"] + e["event_id"]).encode()).hexdigest()[:28]}
+        self.check_stopped()
         self.s["pending"] = pending
         self.save()  # durable intent before network submission; never blindly resend
-        if self.c["mode"] == "paper":
-            result = self.paper_result(pending)
-        else:
-            result = self.exchange.order(pending)
+        # Serialize the decision to submit with pause acknowledgement. Once this
+        # reservation is made, this one order is in flight and must be settled.
+        with self.control_lock:
+            submit = not self.stop_requested.is_set()
+            self.submitting = submit
+        if not submit:
+            self.s["pending"] = None
+            self.save()
+            self.check_stopped()
+        try:
+            if self.c["mode"] == "paper":
+                result = self.paper_result(pending)
+            else:
+                result = self.exchange.order(pending)
+        finally:
+            with self.control_lock:
+                self.submitting = False
         self.settle(result)
 
     @staticmethod
@@ -378,7 +555,7 @@ class Engine:
             if quantity > old_q:
                 raise RuntimeError("平仓成交数量超出本系统账本，需人工核对")
             pnl = (price - old_p) * quantity * (1 if p["event"]["side"] == "LONG" else -1)
-            self.s["realized"] += float(pnl)
+            self.s["realized"] = str(dec(self.s["realized"]) + pnl)
             own["quantity"] = str(old_q - quantity)
         normal_ioc = p.get("order_type") == "LIMIT" and p.get("time_in_force") == "IOC" and status in ("EXPIRED", "CANCELED")
         note = "模拟成交" if self.c["mode"] == "paper" else "交易所确认结果"
@@ -392,10 +569,15 @@ class Engine:
         self.s.pop("processing", None)
         if status != "FILLED" and not normal_ioc:
             self.s.update(running=False, error="订单未完全成交，请检查记录后再启动")
+            if p["operation"] == "CLOSE" and dec(own["quantity"]) > 0:
+                self.s["review_required"] = "平仓订单未完全成交，仍有剩余仓位，请人工核对后恢复"
+                self.s["error"] = self.s["review_required"]
         self.save()
 
     def resolve(self):
         with self.lock:
+            if self.storage_error:
+                raise ValueError(self.storage_error)
             if not self.s["pending"]:
                 raise ValueError("当前无待确认订单")
             if self.c["mode"] == "paper":
@@ -403,22 +585,48 @@ class Engine:
                 self.settle(self.paper_result(p))
             else:
                 self.settle(self.exchange.query(self.s["pending"]))
-            self.s.update(running=False, error=None)
+            self.s.update(running=False, error=self.s.get("review_required"))
             self.save()
 
     def view(self):
-        with self.lock:
+        if self.storage_error:
+            result = copy.deepcopy(self.snapshot)
+        elif self.lock.acquire(blocking=False):
             try:
-                source_stale = not self.source.get("updated") or not -10 <= age(self.source["updated"]) <= self.c["source_age"]
-            except (ValueError, TypeError):
-                source_stale = True
-            return {"mode": self.c["mode"], "capital": str(self.c["capital"]), "multiplier": str(self.c["multiplier"]),
-                "opening_order": "LIMIT IOC · 熬鹰成交均价", "closing_order": "MARKET reduceOnly",
-                "max_gross": str(self.c["max_gross"]), "leverage": self.c["leverage"], "source": self.source,
-                "running": self.s["running"], "error": self.s["error"], "positions": self.s["positions"],
-                "records": self.s["records"][:100], "pending": bool(self.s["pending"]),
-                "last_poll": self.s.get("last_poll"), "realized": self.s["realized"],
-                "source_stale": source_stale,
-                "dingtalk": {"enabled": self.notifier.enabled, "pending": len(self.s.get("notifications", [])),
-                    "last_sent": self.s.get("notification_last_sent"), "error": self.s.get("notification_error")},
-                "credentials_configured": bool(self.c["key"] and self.c["secret"])}
+                result = copy.deepcopy(self._view())
+            finally:
+                self.lock.release()
+        else:
+            result = copy.deepcopy(self.snapshot)
+        result["stop_requested"] = self.stop_requested.is_set()
+        result["order_in_flight"] = self.submitting
+        if self.stop_requested.is_set():
+            result["running"] = False
+        if self.storage_error:
+            result["error"] = self.storage_error
+        elif self.worker_error:
+            result["error"] = self.worker_error
+        try:
+            result["source_stale"] = not result["source"].get("updated") or not -10 <= age(result["source"]["updated"]) <= self.c["source_age"]
+        except (ValueError, TypeError):
+            result["source_stale"] = True
+        result["executor_busy"] = not self.lock.acquire(blocking=False)
+        if not result["executor_busy"]:
+            self.lock.release()
+        return result
+
+    def _view(self):
+        try:
+            source_stale = not self.source.get("updated") or not -10 <= age(self.source["updated"]) <= self.c["source_age"]
+        except (ValueError, TypeError):
+            source_stale = True
+        return {"mode": self.c["mode"], "capital": str(self.c["capital"]), "multiplier": str(self.c["multiplier"]),
+            "opening_order": "LIMIT IOC · 熬鹰成交均价", "closing_order": "MARKET reduceOnly",
+            "max_gross": str(self.c["max_gross"]), "leverage": self.c["leverage"], "source": self.source,
+            "running": self.s["running"], "error": self.s["error"], "positions": self.s["positions"],
+            "records": self.s["records"][:100], "pending": bool(self.s["pending"]),
+            "last_poll": self.s.get("last_poll"), "realized": self.s["realized"],
+            "source_stale": source_stale,
+            "dingtalk": {"enabled": self.notifier.enabled, "pending": len(self.s.get("notifications", [])),
+                "last_sent": self.s.get("notification_last_sent"), "error": self.s.get("notification_error")},
+            "credentials_configured": bool(self.c["key"] and self.c["secret"])}

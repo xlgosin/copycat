@@ -32,11 +32,11 @@ class CopyCatTests(unittest.TestCase):
         self.engine = Engine(self.c, Market())
         self.events = []
         self.profile = {"margin_balance": 300000, "aum": 6300000, "captured_at": stamp()}
-        self.status = {"last_success_at": stamp()}
+        self.status = {"last_success_at": stamp(), "history_complete": True}
         self.engine.read_source = lambda: (self.profile, self.events, self.status)
         self.engine.tick()
         self.engine.start()
-        self.when = datetime.now(timezone.utc) - timedelta(seconds=30)
+        self.when = datetime.now(timezone.utc)
 
     def tearDown(self):
         self.tmp.cleanup()
