@@ -4,7 +4,6 @@ import hmac
 import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -86,13 +85,20 @@ class NotificationTests(unittest.TestCase):
         self.e.deliver_notification()
         self.assertEqual(self.e.s["notifications"], [])
 
-    def test_reuses_only_previous_dingtalk_keys(self):
-        with patch.dict(os.environ, {}, clear=True), patch("notifications.dotenv_values", return_value={
-            "DINGTALK_WEBHOOK": CONFIG["webhook"], "DINGTALK_SECRET": CONFIG["secret"], "LIVE_TRADING_ENABLED": "true"
-        }), patch.object(Path, "is_file", return_value=True):
-            config = notification_config(Path("/tmp/CopyCat"))
+    def test_reads_direct_dingtalk_configuration(self):
+        with patch.dict(os.environ, {
+            "DINGTALK_WEBHOOK": CONFIG["webhook"], "DINGTALK_SECRET": CONFIG["secret"]
+        }, clear=True):
+            config = notification_config()
             self.assertEqual(config, CONFIG)
             self.assertNotIn("LIVE_TRADING_ENABLED", os.environ)
+
+    def test_missing_local_config_does_not_read_old_env(self):
+        with patch.dict(os.environ, {"DINGTALK_ENV_FILE":"../binance-copy-monitor/.env"}, clear=True), patch("builtins.open") as opened:
+            config = notification_config()
+            self.assertFalse(DingTalk(config).enabled)
+            self.assertEqual(config["secret"], "")
+            opened.assert_not_called()
 
     def test_signed_payload_and_redaction(self):
         notifier = DingTalk(CONFIG)

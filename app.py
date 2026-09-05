@@ -50,7 +50,7 @@ def settings():
             and 0 < c["max_gross"] <= c["capital"] * 3 and 0 < c["deviation"] <= 5
             and c["source_age"] > 0 and c["signal_age"] > 0):
         raise ValueError("本版预算最多100U，倍率/杠杆最多3，总敞口最多本金3倍；时效参数须为正")
-    c["dingtalk"] = notification_config(ROOT)
+    c["dingtalk"] = notification_config()
     return c
 
 

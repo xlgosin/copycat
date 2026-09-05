@@ -114,14 +114,15 @@ ssh -L 8010:127.0.0.1:8010 用户@服务器
 
 ## 钉钉通知
 
-默认从 `../binance-copy-monitor/.env` 读取 `DINGTALK_WEBHOOK` 和 `DINGTALK_SECRET`，不导入旧项目的交易、端口等其他设置，也不向界面返回密钥。当前 CopyCat `.env` 已设置：
+直接在 CopyCat 自己的 `.env` 中配置，不再读取其他项目的 `.env`，也不向界面返回密钥：
 
 ```dotenv
 DINGTALK_ENABLED=true
-DINGTALK_ENV_FILE=../binance-copy-monitor/.env
+DINGTALK_WEBHOOK=你的钉钉机器人Webhook
+DINGTALK_SECRET=你的加签Secret
 ```
 
-部署后若目录不同，请修改 `DINGTALK_ENV_FILE`；也可以在 CopyCat `.env` 直接设置 `DINGTALK_WEBHOOK` 和 `DINGTALK_SECRET`。修改后重启生效。
+部署时将配置保存在服务器的 CopyCat `.env` 中，修改后重启生效。未填写 Webhook 时不发送通知。
 
 通知覆盖开仓成交、平仓成交、跳过/拒绝订单、异常暂停和待确认订单。每条包含 CopyCat、熬鹰跟单、运行模式、合约方向、原因；已确认成交附数量、价格、客户订单号，平仓附本次毛盈亏。模拟通知明确标记“模拟”，待确认通知不会把请求数量写成成交数量。历史基线不补发通知。
 
