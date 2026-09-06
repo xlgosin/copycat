@@ -9,12 +9,12 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent
 BASE = "https://www.binance.com/bapi/futures/v1/friendly/future/copy-trade/"
+SHANGHAI = timezone(timedelta(hours=8))
 
 
 def parse_orders(items, portfolio):
@@ -94,7 +94,7 @@ def poll(page, path, portfolio):
     equity = amount(r"(?:帶單保證金餘額|带单保证金余额|帶單餘額|带单余额|Leading Margin Balance)")
     if not equity or equity <= 0:
         raise ValueError("页面未读取到带单余额，请检查地区/登录要求/网页变化")
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    now = datetime.now(SHANGHAI)
     coverage_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     baseline = None
     baseline_path = os.getenv("SOURCE_BASELINE_FILE", "").strip()
@@ -170,8 +170,12 @@ if __name__ == "__main__":
         raise SystemExit("交易员ID无效")
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
-        page = browser.new_page(locale="zh-TW")
         while True:
+            # Chromium renderers retain a sizeable working set after navigation.
+            # Use a fresh context for every poll so cookies, page resources and the
+            # renderer process are released instead of accumulating indefinitely.
+            context = browser.new_context(locale="zh-TW")
+            page = context.new_page()
             try:
                 poll(page,path,portfolio)
                 if args.once:
@@ -190,3 +194,5 @@ if __name__ == "__main__":
                     print(str(exc)[:300], flush=True)
                     raise SystemExit(1)
                 time.sleep(300)
+            finally:
+                context.close()

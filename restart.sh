@@ -20,6 +20,14 @@ fi
 mkdir -p "$RUN_DIR" "$LOG_DIR" "$ROOT/data"
 chmod 700 "$ROOT/data" 2>/dev/null || true
 
+# Cap local restart.sh log: keep last ~20MB by truncating head when oversized.
+if [[ -f "$RUNNER_LOG" ]]; then
+  size="$(wc -c <"$RUNNER_LOG" | tr -d ' ')"
+  if [[ "${size:-0}" -gt $((20 * 1024 * 1024)) ]]; then
+    tail -c "$((10 * 1024 * 1024))" "$RUNNER_LOG" >"${RUNNER_LOG}.tmp" && mv "${RUNNER_LOG}.tmp" "$RUNNER_LOG"
+  fi
+fi
+
 python_ok() {
   local bin="$1"
   command -v "$bin" >/dev/null 2>&1 && "$bin" -c \

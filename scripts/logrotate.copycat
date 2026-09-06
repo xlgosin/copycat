@@ -1,0 +1,10 @@
+/opt/copycat/logs/*.log {
+    weekly
+    rotate 8
+    size 20M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

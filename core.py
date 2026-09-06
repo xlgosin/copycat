@@ -475,6 +475,12 @@ class Engine:
                 profile, events, status = self.read_source()
                 self.source = {"name": profile.get("name", "熬鹰资本"), "equity": profile.get("margin_balance"),
                                "aum": profile.get("aum"), "updated": status.get("last_success_at"), "count": len(events)}
+                # Clear sticky "source missing" after collector catches up (paused ticks used to leave it).
+                if self.s.get("error") in (
+                    "爬虫尚未采集到熬鹰账户，请先在原项目后台配置该交易员",
+                    "未找到原爬虫数据库，请设置 SOURCE_DB 并启动 binance-copy-monitor",
+                ):
+                    self.s["error"] = None
                 if not self.s["initialized"]:
                     self.establish_baseline(profile, events, status)
                     self.s["coverage_end"] = status.get("history_window_end")

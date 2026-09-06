@@ -268,6 +268,16 @@ if [[ '$WITH_COLLECTOR' -eq 1 ]]; then
 fi
 
 install -m 644 scripts/systemd/copycat.service /etc/systemd/system/copycat.service
+
+# Log caps: file logs + journald + (docker log-opt in unit)
+if command -v logrotate >/dev/null 2>&1; then
+  sed "s|/opt/copycat|${REMOTE_DIR}|g" scripts/logrotate.copycat > /etc/logrotate.d/copycat
+  chmod 644 /etc/logrotate.d/copycat
+fi
+install -d /etc/systemd/journald.conf.d
+install -m 644 scripts/journald-copycat.conf /etc/systemd/journald.conf.d/copycat.conf
+systemctl restart systemd-journald 2>/dev/null || true
+
 systemctl daemon-reload
 systemctl enable copycat.service
 systemctl restart copycat.service

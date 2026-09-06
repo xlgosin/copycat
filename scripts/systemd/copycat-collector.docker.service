@@ -12,9 +12,16 @@ TimeoutStopSec=40
 WorkingDirectory=/opt/copycat
 ExecStartPre=-/usr/bin/docker rm -f copycat-collector
 ExecStart=/usr/bin/docker run --rm --name copycat-collector \
+  --log-driver json-file \
+  --log-opt max-size=20m \
+  --log-opt max-file=5 \
+  --memory 768m \
+  --memory-swap 768m \
+  --pids-limit 256 \
   --env-file /opt/copycat/.env \
   -v /opt/copycat/data:/opt/copycat/data \
   -v /opt/copycat/.env:/opt/copycat/.env:ro \
+  -v /opt/copycat/collect.py:/opt/copycat/collect.py:ro \
   copycat-collector:latest
 ExecStop=-/usr/bin/docker stop -t 20 copycat-collector
 StandardOutput=journal

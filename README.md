@@ -167,6 +167,11 @@ CentOS 7 等旧系统会自动用 Docker 跑采集器。控制台默认 `HOST=0.
 http://服务器IP:8010
 ```
 
+日志上限（部署时写入）：
+- journald：约 300MB（`scripts/journald-copycat.conf`）
+- Docker 采集器：单文件 20MB × 5（unit 里 `--log-opt`）
+- `logs/*.log`：logrotate 单文件约 20MB（`scripts/logrotate.copycat`）
+
 ### AlphaFox 延迟探针
 
 只读检查公开策略摘要以及登录后可见的订单、仓位和信号源仓位。首次匿名验证：
