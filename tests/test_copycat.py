@@ -202,29 +202,32 @@ class CopyCatTests(unittest.TestCase):
         self.assertEqual(Binance.limit_price(RULE, dec("100.005"), "BUY"), dec("100.00"))
         self.assertEqual(Binance.limit_price(RULE, dec("100.005"), "SELL"), dec("100.01"))
 
-    def test_limit_ioc_payload_and_market_reduce_only_close(self):
+    def test_market_open_and_reduce_only_close_payload(self):
         client = Binance("testnet")
         client.request = Mock(return_value={})
         p = {"symbol":"ETHUSDT", "order_side":"BUY", "operation":"OPEN", "quantity":"0.3",
-             "client_id":"cc_limit", "limit_price":"100.00"}
+             "client_id":"cc_mkt", "order_type":"MARKET"}
         client.order(p)
         params = client.request.call_args.args[2]
-        self.assertEqual((params["type"],params["timeInForce"],params["price"]), ("LIMIT","IOC","100.00"))
+        self.assertEqual(params["type"], "MARKET")
+        self.assertNotIn("price", params)
+        self.assertNotIn("timeInForce", params)
         self.assertNotIn("reduceOnly", params)
         client.order({**p,"operation":"CLOSE","order_side":"SELL"})
         params = client.request.call_args.args[2]
         self.assertEqual((params["type"],params["reduceOnly"]), ("MARKET","true"))
         self.assertNotIn("price",params)
 
-    def test_paper_non_crossing_limit_does_not_fake_fill(self):
+    def test_paper_market_open_fills_at_mark(self):
         e = self.event(1)
         e["price"] = 99.5
         self.events.append(e)
         self.engine.tick()
-        self.assertEqual(dec(self.engine.s["positions"]["ETHUSDT:LONG"]["quantity"]), 0)
+        self.assertEqual(dec(self.engine.s["positions"]["ETHUSDT:LONG"]["quantity"]), dec("0.3"))
         self.assertTrue(self.engine.s["running"])
         self.assertFalse(self.engine.s["pending"])
-        self.assertEqual(self.engine.s["records"][0]["exchange_status"], "EXPIRED")
+        self.assertEqual(self.engine.s["records"][0]["status"], "filled")
+        self.assertEqual(self.engine.s["records"][0]["order_type"], "MARKET")
 
     def test_limit_partial_then_proportional_close(self):
         e = self.event(1)
@@ -237,12 +240,12 @@ class CopyCatTests(unittest.TestCase):
         self.add(2,"CLOSE",150)
         self.assertEqual(dec(self.engine.s["positions"]["ETHUSDT:LONG"]["quantity"]), dec("0.05"))
 
-    def test_limit_uses_lot_size_not_market_lot_size(self):
+    def test_market_quantity_respects_market_lot_size(self):
         rule = {"filters":[dict(f) for f in RULE["filters"]]}
         next(f for f in rule["filters"] if f["filterType"]=="MARKET_LOT_SIZE")["maxQty"]="0.1"
-        self.assertEqual(Binance.quantity(rule,dec("0.3"),dec(100),True),dec("0.3"))
         with self.assertRaises(ValueError):
-            Binance.quantity(rule,dec("0.3"),dec(100),False)
+            Binance.quantity(rule,dec("0.3"),dec(100),True)
+        self.assertEqual(Binance.quantity(rule,dec("0.05"),dec(100),True),dec("0.05"))
 
 
 if __name__ == "__main__":

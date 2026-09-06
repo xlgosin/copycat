@@ -577,37 +577,15 @@ class Engine:
             raise ValueError("同币种已有反向持仓，单向模式不跟此开仓")
         rule, price = self.exchange.market(e["symbol"])
         order_side = "BUY" if (e["side"] == "LONG") == opening else "SELL"
-        limit_price = None
         if opening:
-            source_price = dec(e["price"])
-            deviation_pct = abs(price / source_price - 1) * 100 if source_price > 0 else None
-            if source_price <= 0 or deviation_pct > self.c["deviation"]:
-                def fmt(value, places=None):
-                    value = dec(value)
-                    if places is not None:
-                        value = value.quantize(dec(10) ** -places)
-                    text = format(value, "f")
-                    return text.rstrip("0").rstrip(".") if "." in text else text
-                try:
-                    last = self.exchange.last_price(e["symbol"])
-                    last_part = f"，当前价 {fmt(last)}"
-                except Exception:
-                    last_part = ""
-                if deviation_pct is None:
-                    detail = f"源成交价无效（{fmt(source_price)}），标记价 {fmt(price)}{last_part}"
-                else:
-                    detail = (f"源成交价 {fmt(source_price)}，标记价 {fmt(price)}{last_part}，"
-                              f"偏离 {fmt(deviation_pct, 4)}%（上限 {fmt(self.c['deviation'])}%）")
-                raise ValueError(f"当前价格偏离源成交价格过大，跳过开仓（{detail}）")
             quantity = dec(e["quantity"]) * self.c["capital"] / equity * self.c["multiplier"]
-            limit_price = Binance.limit_price(rule, source_price, order_side)
         else:
             if source_before <= 0 or dec(e["quantity"]) > source_before:
                 raise ValueError("源仓位数量不完整，停止自动平仓并人工核对")
             quantity = dec(own["quantity"]) * dec(e["quantity"]) / source_before
-        quantity = self.exchange.quantity(rule, quantity, limit_price if opening else price, opening)
+        quantity = self.exchange.quantity(rule, quantity, price, opening)
         if opening:
-            risk_price = max(price, limit_price)
+            risk_price = price
             gross = dec(0)
             for k,v in self.s["positions"].items():
                 if dec(v["quantity"]) > 0:
@@ -624,8 +602,8 @@ class Engine:
                 self.exchange.prepare(e["symbol"], self.c["leverage"])
         pending = {"event": e, "key": key, "symbol": e["symbol"], "operation": e["operation"],
             "quantity": str(quantity), "price": str(price),
-            "order_side": order_side, "order_type": "LIMIT" if opening else "MARKET",
-            "limit_price": str(limit_price) if opening else None, "time_in_force": "IOC" if opening else None,
+            "order_side": order_side, "order_type": "MARKET",
+            "limit_price": None, "time_in_force": None,
             "source_before": str(source_before) if not opening else None,
             "client_id": "cc_" + hashlib.sha256((self.c["mode"] + e["event_id"]).encode()).hexdigest()[:28]}
         self.check_stopped()
@@ -756,7 +734,7 @@ class Engine:
         except (ValueError, TypeError):
             source_stale = True
         return {"mode": self.c["mode"], "capital": str(self.c["capital"]), "multiplier": str(self.c["multiplier"]),
-            "opening_order": "LIMIT IOC · 熬鹰成交均价", "closing_order": "MARKET reduceOnly",
+            "opening_order": "MARKET", "closing_order": "MARKET reduceOnly",
             "max_gross": str(self.c["max_gross"]), "leverage": self.c["leverage"], "source": self.source,
             "account": self.account,
             "running": self.s["running"], "error": self.s["error"], "positions": self.s["positions"],

@@ -86,7 +86,7 @@ def poll(page, path, portfolio):
     previous = json.loads(previous[0]) if previous else {}
     page.goto(f"https://www.binance.com/zh-TC/copy-trading/lead-details/{portfolio}", wait_until="domcontentloaded", timeout=60000)
     page.locator("h1").first.wait_for(timeout=40000)
-    page.wait_for_timeout(4000)
+    page.wait_for_timeout(1500)
     body = " ".join(page.locator("body").inner_text().split())
     def amount(pattern):
         match = re.search(pattern + r"\s*([\d,]+(?:\.\d+)?)\s*USDT", body)
@@ -95,10 +95,7 @@ def poll(page, path, portfolio):
     if not equity or equity <= 0:
         raise ValueError("页面未读取到带单余额，请检查地区/登录要求/网页变化")
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    start = (now - timedelta(days=now.weekday())).replace(hour=0,minute=0,second=0,microsecond=0)
-    if previous.get("last_success_at"):
-        # Include the previous window across week changes and downtime.
-        start = min(start, datetime.fromisoformat(previous["last_success_at"]) - timedelta(minutes=5))
+    coverage_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     baseline = None
     baseline_path = os.getenv("SOURCE_BASELINE_FILE", "").strip()
     if baseline_path:
@@ -112,10 +109,16 @@ def poll(page, path, portfolio):
         if baseline_time.tzinfo is None or baseline_time > now:
             raise ValueError("源仓位基线时间无效")
         if not previous.get("last_success_at"):
-            start = min(start, baseline_time)
+            coverage_start = min(coverage_start, baseline_time)
+    # After bootstrap, only pull a short overlap window — full-week re-fetch made each cycle too slow.
+    # Keep 15 minutes of overlap so delayed public history can still land.
+    if previous.get("last_success_at"):
+        api_start = datetime.fromisoformat(previous["last_success_at"]) - timedelta(minutes=15)
+    else:
+        api_start = coverage_start
     end = now
-    payload = {"portfolioId": portfolio, "startTime": int(start.timestamp()*1000),
-               "endTime": int(end.timestamp()*1000), "pageSize": 10}
+    payload = {"portfolioId": portfolio, "startTime": int(api_start.timestamp()*1000),
+               "endTime": int(end.timestamp()*1000), "pageSize": 50}
     items = []
     for _ in range(40):
         data = request(page, "lead-portfolio/order-history", payload)
@@ -124,18 +127,19 @@ def poll(page, path, portfolio):
             raise ValueError("源交易列表格式异常")
         items.extend(rows)
         cursor = data.get("indexValue")
-        if not cursor or len(rows) < 10:
+        if not cursor or len(rows) < payload["pageSize"]:
             break
         payload["indexValue"] = str(cursor)
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(200)
     else:
-        raise ValueError("历史超过400条，当前窗口不完整；改用原爬虫数据或缩小历史窗口后人工检查")
+        raise ValueError("历史超过单次拉取上限，当前窗口不完整；改用原爬虫数据或缩小历史窗口后人工检查")
     events = parse_orders(items, portfolio)
     updated = datetime.now(timezone.utc).isoformat()
     profile = {"name": page.locator("h1").first.inner_text(), "margin_balance": equity,
                "aum": amount(r"(?:資產管理規模|资产管理规模|AUM)"), "captured_at": updated}
     if baseline:
         profile["position_baseline"] = baseline
+    window_start = previous.get("history_window_start") or coverage_start.isoformat()
     with sqlite3.connect(path) as con:
         for e in events:
             old = con.execute("SELECT quantity,price FROM trade_events WHERE event_id=?", (e["event_id"],)).fetchone()
@@ -146,7 +150,7 @@ def poll(page, path, portfolio):
         con.execute("INSERT OR REPLACE INTO runtime_state VALUES(?,?,?)",
                     ("collector_status:"+portfolio,json.dumps({"last_success_at": end.isoformat(), "last_error":None,
                      "history_complete": False,
-                     "history_window_start": previous.get("history_window_start") or start.isoformat(),
+                     "history_window_start": window_start,
                      "history_window_end": end.isoformat()}),updated))
     print(f"{updated} 熬鹰余额 {equity} USDT，读取 {len(events)} 条历史", flush=True)
 

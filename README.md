@@ -62,8 +62,8 @@ SOURCE_POLL_SECONDS=60
 
 - 本金默认100 USDT；比例放大3倍；合约杠杆3倍；开仓后名义敞口检查上限300 USDT。这些是开仓前限制，价格上涨后的名义金额可以超过300。
 - 开仓数量 = 源成交数量 × 100 / 源带单保证金余额 × 3。这里使用爬虫字段 `margin_balance`，并非包括跟单资金的 `aum`，也不能保证网页数值与交易所逐秒权益一致。
-- 开仓使用 **LIMIT + IOC**，委托价取熬鹰成交均价：买单按价格步长向下取整、卖单向上取整。只立即撮合一次，未成交部分自动取消，永不转市价补单。可能完全不成交或仅成交部分，不保证Maker费率。
-- 正常IOC到期属于跳过/部分成交，按实际成交数量入账并继续跟单；结果未知仍暂停并查询原订单号。平仓继续使用 `MARKET + reduceOnly`。
+- 开仓与平仓均使用 **MARKET**；平仓带 `reduceOnly`。不再使用源成交均价限价 IOC，也不再因价格偏离跳过开仓；市价可能有滑点。
+- 市价未完全成交等异常终态仍会暂停并查询原订单号。
 - 平仓数量 = 本系统该方向剩余数量 × 源平仓数量 / 源平仓前推算数量。向下取整满足数量规则；不足最小数量或源记录不完整时不强行下单。有剩余仓位但漏平信号时会锁定自动运行，须人工处理。
 - 实盘只支持 USDT 永续、单向持仓、单资产保证金，并将跟出的合约设置为逐仓3倍。同币种已有反向仓位时跳过新开仓。
 - 市价订单可能有滑点，3倍放大不保证收益或100U最大亏损。请使用仅为 CopyCat 准备、约100U余额的独立合约账户，不与手工或其他机器人交易混用。
@@ -145,6 +145,24 @@ DINGTALK_SECRET=你的加签Secret
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+### AlphaFox 延迟探针
+
+只读检查公开策略摘要以及登录后可见的订单、仓位和信号源仓位。首次匿名验证：
+
+```bash
+.venv/bin/python alphafox_probe.py --once
+```
+
+私有接口返回 401 时，将自己已登录 AlphaFox 会话的完整 `Cookie` 请求头放入本机 `.env` 的
+`ALPHAFOX_COOKIE`（不要发给他人或提交版本库），再持续采样：
+
+```bash
+.venv/bin/python alphafox_probe.py --interval 5
+```
+
+结果保存在 `data/alphafox-probe.db`。`probe_runs` 保存每次请求耗时，`snapshots` 只在接口内容变化时
+保存首次发现时间和原始 JSON，供后续与币安成交时间比较。探针不会调用 CopyCat 交易引擎。
 
 安装了 Node.js、Playwright 和相应浏览器时，可运行 `node tests/frontend_check.cjs` 验证前端超时恢复、操作互斥、暂停和历史分页。使用本机 Chrome 可设置 `PLAYWRIGHT_CHANNEL=chrome`。该测试拦截全部请求并返回本地模拟数据，不启动交易服务。
 

@@ -93,7 +93,8 @@ class Binance:
     @staticmethod
     def quantity(rule, requested, price, opening):
         filters = {f["filterType"]: f for f in rule["filters"]}
-        lots = [filters[k] for k in (("LOT_SIZE",) if opening else ("LOT_SIZE", "MARKET_LOT_SIZE")) if k in filters]
+        # Opens and closes both use market orders; apply market lot constraints too.
+        lots = [filters[k] for k in ("LOT_SIZE", "MARKET_LOT_SIZE") if k in filters]
         steps = [dec(f["stepSize"]) for f in lots if dec(f["stepSize"]) > 0]
         step = max(steps)
         quantity = (requested / step).to_integral_value(rounding=ROUND_DOWN) * step
@@ -139,13 +140,13 @@ class Binance:
 
     def order(self, pending):
         params = {"symbol": pending["symbol"], "side": pending["order_side"],
-                  "type": "LIMIT" if pending["operation"] == "OPEN" else "MARKET",
+                  "type": pending.get("order_type") or "MARKET",
                   "quantity": pending["quantity"], "newClientOrderId": pending["client_id"],
                   "newOrderRespType": "RESULT", "positionSide": "BOTH"}
         if pending["operation"] == "CLOSE":
             params["reduceOnly"] = "true"
-        else:
-            params.update(price=pending["limit_price"], timeInForce="IOC")
+        elif params["type"] == "LIMIT":
+            params.update(price=pending["limit_price"], timeInForce=pending.get("time_in_force") or "IOC")
         return self.request("POST", "/fapi/v1/order", params, True)
 
     def query(self, pending):
