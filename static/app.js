@@ -43,12 +43,26 @@ function render(s){
     $('fixHedge').onclick=()=>openHedgeDialog();
   }else{$('error').textContent=warning}
   $('resolve').hidden=!s.pending;
-  $('pnl').textContent='累计平仓毛盈亏 '+number(s.realized)+' USDT';
+  const positions=Object.entries(s.positions||{}).filter(([,p])=>Number(p.quantity)>0);
+  const live=s.live_positions||{};
+  const unrealized=Object.values(live).reduce((sum,row)=>sum+(Number(row?.unrealized_pnl)||0),0);
+  $('pnl').textContent='累计平仓毛盈亏 '+number(s.realized)+' USDT'+(positions.length?` · 未实现 ${unrealized>=0?'+':''}${number(unrealized)} USDT`:'');
   $('aum').textContent='源资产管理规模（仅展示）：'+number(s.source.aum)+' USDT';
-  const positions=Object.entries(s.positions).filter(([,p])=>Number(p.quantity)>0);
   $('closeAll').hidden=!positions.length;
   $('closeAll').disabled=actionBusy||Boolean(s.pending);
-  $('positionList').innerHTML=positions.length?positions.map(([k,p])=>{const [symbol,side]=k.split(':');return `<article class="card"><div class="cardhead"><strong>${escape(symbol)}</strong><span class="tag">${side==='LONG'?'多头':'空头'}</span><button class="danger position-close" data-key="${escape(k)}">平仓</button></div><div class="grid"><div><small>持仓数量</small>${number(p.quantity,8)}</div><div><small>开仓均价</small>${number(p.entry,8)}</div><div><small>开仓名义金额</small>${number(Number(p.quantity)*Number(p.entry))} USDT</div></div></article>`}).join(''):'<div class="empty">暂无跟单仓位，启动后等待新的开仓信号。</div>';
+  const signed=(value,digits=2)=>{const n=Number(value);if(!Number.isFinite(n))return '—';const text=(n>0?'+':'')+number(n,digits);return `<span class="${n>0?'green':n<0?'red':''}">${text}</span>`};
+  $('positionList').innerHTML=positions.length?positions.map(([k,p])=>{
+    const [symbol,side]=k.split(':');
+    const L=live[k]||{};
+    const mark=L.mark_price!=null?number(L.mark_price,8):'—';
+    const notional=L.notional!=null?number(L.notional):number(Number(p.quantity)*Number(p.entry));
+    const roe=L.roe_percent!=null?signed(L.roe_percent)+'%':'—';
+    const margin=L.margin!=null?number(L.margin)+' USDT':'—';
+    const lev=L.leverage!=null?L.leverage+'×':(s.leverage?s.leverage+'×':'—');
+    const liq=L.liquidation_price!=null&&Number(L.liquidation_price)>0?number(L.liquidation_price,8):'—';
+    const status=L.error?escape(L.error):(L.status||'持有中');
+    return `<article class="card"><div class="cardhead"><strong>${escape(symbol)}</strong><span class="tag">${side==='LONG'?'多头':'空头'}</span><span class="tag">${status}</span><button class="danger position-close" data-key="${escape(k)}">平仓</button></div><div class="grid"><div><small>持仓数量</small>${number(p.quantity,8)}</div><div><small>开仓均价</small>${number(p.entry,8)}</div><div><small>标记价格</small>${mark}</div><div><small>当前名义金额</small>${notional} USDT</div><div><small>未实现盈亏</small>${L.unrealized_pnl!=null?signed(L.unrealized_pnl)+' USDT':'—'}</div><div><small>收益率</small>${roe}</div><div><small>逐仓保证金</small>${margin}</div><div><small>杠杆</small>${lev}</div><div><small>强平价</small>${liq}</div></div></article>`;
+  }).join(''):'<div class="empty">暂无跟单仓位，启动后等待新的开仓信号。</div>';
   const labels={filled:'成交',skipped:'跳过',blocked:'已阻止',baseline:'初始化',rejected:'未成交'};
   const records=historyPage?historyPage.records:s.records;
   $('orderList').innerHTML=records.length?records.map(r=>{

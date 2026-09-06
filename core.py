@@ -28,6 +28,9 @@ def age(value):
 SOURCE_HEALTH_ERRORS = (
     "爬虫尚未采集到熬鹰账户，请先在原项目后台配置该交易员",
     "未找到原爬虫数据库，请设置 SOURCE_DB 并启动 binance-copy-monitor",
+    "源采集暂时中断或数据过期，已暂停跟单；恢复后将自动继续",
+    "带单账户金额已过期，已暂停跟单；恢复后将自动继续",
+    # Legacy wording kept so older sticky ledger errors still clear on recovery.
     "原爬虫未成功更新或数据过期，暂停跟单并检查原项目",
     "带单账户金额已过期，暂停跟单",
 )
@@ -125,6 +128,8 @@ class Engine:
         self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
                         "updated": None, "error": None, "mismatch": False, "label": "U本位", "hedge_mode": None}
         self._account_refreshed_at = 0
+        self.live_positions = {}
+        self._live_positions_refreshed_at = 0
         self.refresh_account(force=True)
         self.save()
 
@@ -163,6 +168,77 @@ class Engine:
             self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
                             "updated": stamp(), "error": str(exc)[:160], "mismatch": False, "label": "U本位",
                             "hedge_mode": hedge}
+
+    def refresh_live_positions(self, owned, force=False):
+        """Enrich open CopyCat positions with mark/PnL. Throttled to ~15s when holding."""
+        owned = {k: v for k, v in (owned or {}).items() if dec(v.get("quantity", 0)) > 0}
+        if not owned:
+            self.live_positions = {}
+            self._live_positions_refreshed_at = 0
+            return
+        now = time.time()
+        if not force and self._live_positions_refreshed_at and now - self._live_positions_refreshed_at < 15:
+            return
+        leverage = self.c["leverage"]
+        live = {}
+        rows_by_symbol = {}
+        try:
+            if self.c["key"] and self.c["secret"]:
+                for row in self.exchange.positions():
+                    if row.get("positionSide") not in (None, "BOTH"):
+                        continue
+                    amt = dec(row.get("positionAmt") or 0)
+                    if amt == 0:
+                        continue
+                    side = "LONG" if amt > 0 else "SHORT"
+                    rows_by_symbol[f"{row['symbol']}:{side}"] = row
+        except Exception as exc:
+            self._live_positions_refreshed_at = now
+            self.live_positions = {k: {**(self.live_positions.get(k) or {}), "error": str(exc)[:120]}
+                                  for k in owned}
+            return
+        for key, pos in owned.items():
+            symbol, side = key.split(":", 1)
+            qty = dec(pos.get("quantity") or 0)
+            entry = dec(pos.get("entry") or 0)
+            row = rows_by_symbol.get(key)
+            try:
+                if row:
+                    mark = dec(row.get("markPrice") or 0)
+                    pnl = dec(row.get("unRealizedProfit") or 0)
+                    liq = dec(row.get("liquidationPrice") or 0)
+                    margin = dec(row.get("isolatedMargin") or row.get("positionInitialMargin") or 0)
+                    lev = int(dec(row.get("leverage") or leverage))
+                    notional = abs(dec(row.get("notional") or mark * qty))
+                else:
+                    _, mark = self.exchange.market(symbol)
+                    pnl = (mark - entry) * qty if side == "LONG" else (entry - mark) * qty
+                    liq = dec(0)
+                    margin = (entry * qty) / dec(leverage) if leverage else dec(0)
+                    lev = leverage
+                    notional = mark * qty
+                if mark <= 0 or entry <= 0 or qty <= 0:
+                    raise ValueError("仓位价格无效")
+                roe = (pnl / margin * dec(100)) if margin > 0 else dec(0)
+                live[key] = {
+                    "status": "持有中",
+                    "mark_price": str(mark),
+                    "entry_price": str(entry),
+                    "quantity": str(qty),
+                    "notional": str(notional),
+                    "unrealized_pnl": str(pnl),
+                    "roe_percent": str(roe),
+                    "liquidation_price": str(liq) if liq > 0 else None,
+                    "margin": str(margin) if margin > 0 else None,
+                    "leverage": lev,
+                    "updated": stamp(),
+                    "error": None,
+                }
+            except Exception as exc:
+                live[key] = {**(self.live_positions.get(key) or {}), "status": "持有中",
+                             "error": str(exc)[:120], "updated": stamp()}
+        self.live_positions = live
+        self._live_positions_refreshed_at = now
 
     def check_position_mode(self):
         """Fetch dual/one-way once until known one-way; not polled with account balance."""
@@ -356,9 +432,9 @@ class Engine:
         # A transient collector failure sets last_error while keeping the previous
         # last_success_at. Only reject when the last success itself is missing/stale.
         if not updated or not -10 <= age(updated) <= self.c["source_age"]:
-            raise ValueError("原爬虫未成功更新或数据过期，暂停跟单并检查原项目")
+            raise ValueError("源采集暂时中断或数据过期，已暂停跟单；恢复后将自动继续")
         if not profile.get("captured_at") or not -10 <= age(profile["captured_at"]) <= self.c["source_age"]:
-            raise ValueError("带单账户金额已过期，暂停跟单")
+            raise ValueError("带单账户金额已过期，已暂停跟单；恢复后将自动继续")
         equity = dec(profile.get("margin_balance") or 0)
         if equity <= 0:
             raise ValueError("无法获取有效的带单保证金余额，不能计算跟单比例")
@@ -821,9 +897,13 @@ class Engine:
                 self.lock.release()
         else:
             result = copy.deepcopy(self.snapshot)
+        owned = {k: v for k, v in (result.get("positions") or {}).items() if dec(v.get("quantity", 0)) > 0}
+        self.refresh_live_positions(owned)
+        result["live_positions"] = copy.deepcopy(self.live_positions)
         result["account"] = copy.deepcopy(self.account)
         if self.snapshot is not None:
             self.snapshot["account"] = copy.deepcopy(self.account)
+            self.snapshot["live_positions"] = copy.deepcopy(self.live_positions)
         result["stop_requested"] = self.stop_requested.is_set()
         result["order_in_flight"] = self.submitting
         if self.stop_requested.is_set():
@@ -849,7 +929,7 @@ class Engine:
         return {"mode": self.c["mode"], "capital": str(self.c["capital"]), "multiplier": str(self.c["multiplier"]),
             "opening_order": "MARKET", "closing_order": "MARKET reduceOnly",
             "max_gross": str(self.c["max_gross"]), "leverage": self.c["leverage"], "source": self.source,
-            "account": self.account,
+            "account": self.account, "live_positions": self.live_positions,
             "running": self.s["running"], "error": self.s["error"], "positions": self.s["positions"],
             "records": self.s["records"][:100], "pending": bool(self.s["pending"]),
             "last_poll": self.s.get("last_poll"), "realized": self.s["realized"],

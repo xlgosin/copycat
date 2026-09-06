@@ -100,7 +100,7 @@ class RegressionTests(unittest.TestCase):
     def test_auto_resume_after_source_recovers(self):
         self.e.c["auto_resume"] = True
         self.assertTrue(self.e.s.get("auto_resume"))
-        self.e.s.update(running=False, error="原爬虫未成功更新或数据过期，暂停跟单并检查原项目")
+        self.e.s.update(running=False, error="源采集暂时中断或数据过期，已暂停跟单；恢复后将自动继续")
         self.f.status["last_success_at"] = stamp()
         self.f.profile["captured_at"] = stamp()
         self.e.tick()
@@ -320,6 +320,39 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(client.get("/api/records?before=bad", headers=headers).status_code, 400)
         self.assertEqual(client.get("/api/records", headers=headers).status_code, 200)
         self.assertEqual(client.post("/api/start", json=[1], headers=headers).status_code, 400)
+
+    def test_live_positions_enrich_mark_and_pnl(self):
+        self.f.add(1)
+        self.e.exchange.market = lambda symbol: (RULE, dec("110"))
+        view = self.e.view()
+        live = view["live_positions"]["ETHUSDT:LONG"]
+        self.assertEqual(live["status"], "持有中")
+        self.assertEqual(dec(live["mark_price"]), dec("110"))
+        self.assertEqual(dec(live["unrealized_pnl"]), dec("3"))  # (110-100)*0.3
+        self.assertEqual(dec(live["notional"]), dec("33"))
+        self.assertEqual(live["leverage"], 3)
+        self.assertIsNotNone(live["margin"])
+        # Throttle: second call within 15s keeps cache
+        self.e.exchange.market = lambda symbol: (_ for _ in ()).throw(AssertionError("should throttle"))
+        again = self.e.view()
+        self.assertEqual(again["live_positions"]["ETHUSDT:LONG"]["mark_price"], "110")
+
+    def test_live_positions_use_exchange_row_when_keys_present(self):
+        self.e.c["key"], self.e.c["secret"] = "k", "s"
+        self.f.add(1)
+        self.e.exchange.positions = lambda: [{
+            "symbol": "ETHUSDT", "positionSide": "BOTH", "positionAmt": "0.3",
+            "entryPrice": "100", "markPrice": "95", "unRealizedProfit": "-1.5",
+            "liquidationPrice": "80", "isolatedMargin": "10", "leverage": "5",
+            "notional": "28.5",
+        }]
+        live = self.e.view()["live_positions"]["ETHUSDT:LONG"]
+        self.assertEqual(dec(live["mark_price"]), dec("95"))
+        self.assertEqual(dec(live["unrealized_pnl"]), dec("-1.5"))
+        self.assertEqual(dec(live["liquidation_price"]), dec("80"))
+        self.assertEqual(dec(live["margin"]), dec("10"))
+        self.assertEqual(live["leverage"], 5)
+        self.assertEqual(dec(live["roe_percent"]), dec("-15"))
 
 
 if __name__ == "__main__":

@@ -80,13 +80,28 @@ def initialize(path):
         """)
 
 
+def open_lead_page(page, portfolio):
+    url = f"https://www.binance.com/zh-TC/copy-trading/lead-details/{portfolio}"
+    last = None
+    for attempt in range(2):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            page.locator("h1").first.wait_for(timeout=40000)
+            page.wait_for_timeout(1500)
+            return
+        except Exception as exc:
+            last = exc
+            if attempt == 0:
+                page.wait_for_timeout(2000)
+                continue
+            raise last
+
+
 def poll(page, path, portfolio):
     with sqlite3.connect(path) as con:
         previous = con.execute("SELECT value_json FROM runtime_state WHERE key=?", ("collector_status:" + portfolio,)).fetchone()
     previous = json.loads(previous[0]) if previous else {}
-    page.goto(f"https://www.binance.com/zh-TC/copy-trading/lead-details/{portfolio}", wait_until="domcontentloaded", timeout=60000)
-    page.locator("h1").first.wait_for(timeout=40000)
-    page.wait_for_timeout(1500)
+    open_lead_page(page, portfolio)
     body = " ".join(page.locator("body").inner_text().split())
     def amount(pattern):
         match = re.search(pattern + r"\s*([\d,]+(?:\.\d+)?)\s*USDT", body)
@@ -183,7 +198,8 @@ if __name__ == "__main__":
                 time.sleep(max(5, int(os.getenv("SOURCE_POLL_SECONDS", "60"))))
             except Exception as exc:
                 updated = datetime.now(timezone.utc).isoformat()
-                print(f"{updated} 采集失败: {type(exc).__name__}，等待300秒；查看原页是否可访问", flush=True)
+                wait = max(15, int(os.getenv("SOURCE_FAILURE_WAIT_SECONDS", "30")))
+                print(f"{updated} 采集失败: {type(exc).__name__}，等待{wait}秒；查看原页是否可访问", flush=True)
                 with sqlite3.connect(path) as con:
                     previous = con.execute("SELECT value_json FROM runtime_state WHERE key=?", ("collector_status:"+portfolio,)).fetchone()
                     status = json.loads(previous[0]) if previous else {}
@@ -193,6 +209,6 @@ if __name__ == "__main__":
                 if args.once:
                     print(str(exc)[:300], flush=True)
                     raise SystemExit(1)
-                time.sleep(60)
+                time.sleep(wait)
             finally:
                 context.close()

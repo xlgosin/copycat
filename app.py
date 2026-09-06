@@ -40,7 +40,7 @@ def settings():
          "capital": dec(os.getenv("COPY_CAPITAL", "100")), "multiplier": dec(os.getenv("COPY_MULTIPLIER", "3")),
          "leverage": int(os.getenv("FUTURES_LEVERAGE", "3")), "max_gross": dec(os.getenv("MAX_GROSS_NOTIONAL", "300")),
          "signal_age": int(os.getenv("MAX_SIGNAL_AGE_SECONDS", "180")),
-         "source_age": int(os.getenv("MAX_SOURCE_AGE_SECONDS", "180")),
+         "source_age": int(os.getenv("MAX_SOURCE_AGE_SECONDS", "300")),
          "deviation": dec(os.getenv("MAX_PRICE_DEVIATION_PERCENT", "1")),
          "poll": max(5, int(os.getenv("POLL_SECONDS", "5"))),
          "live_enabled": os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true",
