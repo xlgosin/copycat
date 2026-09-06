@@ -79,6 +79,14 @@ class CopyCatTests(unittest.TestCase):
         self.add(3, "CLOSE", 300, "SHORT")
         self.assertEqual(dec(self.engine.s["positions"]["ETHUSDT:SHORT"]["quantity"]), 0)
 
+    def test_manual_close_pauses_and_blocks_current_source_cycle(self):
+        self.add(1, side="SHORT")
+        self.assertEqual(self.engine.manual_close("ETHUSDT:SHORT"), 1)
+        self.assertEqual(dec(self.engine.s["positions"]["ETHUSDT:SHORT"]["quantity"]), 0)
+        self.assertFalse(self.engine.s["running"])
+        self.assertIn("ETHUSDT:SHORT", self.engine.s["blocked_cycles"])
+        self.assertIn("手动平仓", self.engine.s["records"][0]["note"])
+
     def test_duplicates_and_restart_dont_trade_again(self):
         self.add(1)
         self.engine.tick()
@@ -140,9 +148,7 @@ class CopyCatTests(unittest.TestCase):
         self.assertTrue(self.engine.s["pending"])
         self.engine.tick()
         self.assertEqual(len(calls), 1)
-        self.engine.resolve()
         self.assertFalse(self.engine.s["pending"])
-        self.assertFalse(self.engine.s["running"])
         self.assertEqual(dec(self.engine.s["positions"]["ETHUSDT:LONG"]["quantity"]), dec("0.3"))
 
     def test_partial_fill_applies_executed_only(self):

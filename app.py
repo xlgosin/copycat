@@ -147,6 +147,26 @@ def create_app(engine, token):
             engine.report_error(str(exc))
             return jsonify(error=str(exc)), 400
 
+    @app.post("/api/close-position")
+    def close_position():
+        try:
+            body = request.get_json(silent=True) or {}
+            key = body.get("key")
+            if not isinstance(key, str) or ":" not in key:
+                raise ValueError("持仓参数无效")
+            return jsonify(ok=True, closed=engine.manual_close(key))
+        except Exception as exc:
+            engine.report_error(str(exc))
+            return jsonify(error=str(exc)), 400
+
+    @app.post("/api/close-all")
+    def close_all():
+        try:
+            return jsonify(ok=True, closed=engine.manual_close())
+        except Exception as exc:
+            engine.report_error(str(exc))
+            return jsonify(error=str(exc)), 400
+
     return app
 
 

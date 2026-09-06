@@ -1,4 +1,4 @@
-let token = localStorage.getItem('copycat_admin_token') || '', state = null, busy = false, actionBusy = false, historyBusy = false, historyPage = null;
+let token = localStorage.getItem('copycat_admin_token') || '', state = null, busy = false, actionBusy = false, historyBusy = false, historyPage = null, closeKey = null;
 const $ = id => document.getElementById(id);
 const number = (n, digits=2) => n == null ? '—' : Number(n).toLocaleString('zh-CN',{maximumFractionDigits:digits});
 const escape = x => String(x ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -46,7 +46,9 @@ function render(s){
   $('pnl').textContent='累计平仓毛盈亏 '+number(s.realized)+' USDT';
   $('aum').textContent='源资产管理规模（仅展示）：'+number(s.source.aum)+' USDT';
   const positions=Object.entries(s.positions).filter(([,p])=>Number(p.quantity)>0);
-  $('positionList').innerHTML=positions.length?positions.map(([k,p])=>{const [symbol,side]=k.split(':');return `<article class="card"><div class="cardhead"><strong>${escape(symbol)}</strong><span class="tag">${side==='LONG'?'多头':'空头'}</span></div><div class="grid"><div><small>持仓数量</small>${number(p.quantity,8)}</div><div><small>开仓均价</small>${number(p.entry,8)}</div><div><small>开仓名义金额</small>${number(Number(p.quantity)*Number(p.entry))} USDT</div></div></article>`}).join(''):'<div class="empty">暂无跟单仓位，启动后等待新的开仓信号。</div>';
+  $('closeAll').hidden=!positions.length;
+  $('closeAll').disabled=actionBusy||Boolean(s.pending);
+  $('positionList').innerHTML=positions.length?positions.map(([k,p])=>{const [symbol,side]=k.split(':');return `<article class="card"><div class="cardhead"><strong>${escape(symbol)}</strong><span class="tag">${side==='LONG'?'多头':'空头'}</span><button class="danger position-close" data-key="${escape(k)}">平仓</button></div><div class="grid"><div><small>持仓数量</small>${number(p.quantity,8)}</div><div><small>开仓均价</small>${number(p.entry,8)}</div><div><small>开仓名义金额</small>${number(Number(p.quantity)*Number(p.entry))} USDT</div></div></article>`}).join(''):'<div class="empty">暂无跟单仓位，启动后等待新的开仓信号。</div>';
   const labels={filled:'成交',skipped:'跳过',blocked:'已阻止',baseline:'初始化',rejected:'未成交'};
   const records=historyPage?historyPage.records:s.records;
   $('orderList').innerHTML=records.length?records.map(r=>{
@@ -82,6 +84,13 @@ function openLiveDialog(){
 function openHedgeDialog(){
   $('hedgeError').hidden=true;
   $('hedgeDialog').showModal();
+}
+function openCloseDialog(key){
+  closeKey=key;
+  const position=key&&state?.positions?.[key];
+  $('closeTitle').textContent=key?'确认平仓':'确认全部平仓';
+  $('closeSummary').textContent=key?`${key.replace(':LONG',' 多头').replace(':SHORT',' 空头')} · 数量 ${number(position?.quantity,8)}`:'将关闭全部 CopyCat 跟单持仓。';
+  $('closeDialog').showModal();
 }
 $('start').addEventListener('click', async ()=>{
   if($('start').disabled||state?.running)return;
@@ -120,6 +129,16 @@ $('hedgeForm').addEventListener('submit',async e=>{
 });
 $('stop').addEventListener('click',()=>action('stop'));
 $('resolve').addEventListener('click',()=>action('reconcile'));
+$('closeAll').addEventListener('click',()=>openCloseDialog(null));
+$('positionList').addEventListener('click',e=>{const button=e.target.closest('.position-close');if(button)openCloseDialog(button.dataset.key)});
+$('closeForm').addEventListener('submit',e=>{
+  const submitter=e.submitter;
+  if(submitter&&submitter.value==='cancel'){closeKey=null;return}
+  e.preventDefault();
+  $('closeDialog').close();
+  const key=closeKey;closeKey=null;
+  action(key?'close-position':'close-all',key?{key}:{});
+});
 $('older').addEventListener('click',async()=>{
   if(historyBusy)return;
   historyBusy=true;$('older').disabled=true;

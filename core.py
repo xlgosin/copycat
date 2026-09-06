@@ -115,7 +115,7 @@ class Engine:
             self.s["review_required"] = "上次进程在处理信号时中断，请人工核对后归档账本重新初始化"
         self.s.update(running=False, error=None)
         if self.s.get("pending"):
-            self.s["error"] = "重启发现待确认订单，请核对订单后继续"
+            self.s["error"] = "重启发现待确认订单，系统将自动查询交易所结果"
         if self.s.get("review_required"):
             self.s["error"] = self.s["review_required"]
         if self.s["initialized"] and not self.s.get("baseline_verified"):
@@ -209,7 +209,7 @@ class Engine:
             # Pending quantity is requested, not confirmed filled.
             event.pop("quantity", None)
             event.pop("price", None)
-            self.enqueue_notification("待确认订单", event, f"{error}；请求数量 {pending['quantity']}，尚未确认成交，请点击核对订单")
+            self.enqueue_notification("待确认订单", event, f"{error}；请求数量 {pending['quantity']}，系统将自动查询交易所结果")
             self.s["last_notified_pending"] = pending["client_id"]
         try:
             with self.connection() as con:
@@ -509,6 +509,11 @@ class Engine:
             if self.storage_error:
                 return
             try:
+                # A timed-out submission may already have reached Binance. Query
+                # by the unique client order ID until Binance reports a terminal
+                # result; never submit the same trading intent again.
+                if self.s.get("pending") and not self.auto_resolve_pending():
+                    return
                 profile, events, status = self.read_source()
                 self.source = {"name": profile.get("name", "熬鹰资本"), "equity": profile.get("margin_balance"),
                                "aum": profile.get("aum"), "updated": status.get("last_success_at"), "count": len(events)}
@@ -524,8 +529,6 @@ class Engine:
                     self.establish_baseline(profile, events, status)
                     self.s["coverage_end"] = status.get("history_window_end")
                     self.save()
-                    return
-                if self.s["pending"]:
                     return
                 if self.s.get("review_required"):
                     self.s.update(running=False, error=self.s["review_required"])
@@ -693,11 +696,11 @@ class Engine:
         p = self.s["pending"]
         status = result.get("status")
         if status not in ("FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"):
-            raise RuntimeError("订单结果尚未确定，已暂停；点击核对订单，不会重复下单")
+            raise RuntimeError("订单结果尚未确定，系统将自动查询，不会重复下单")
         quantity = dec(result.get("executedQty", 0))
         price = dec(result.get("avgPrice", 0))
         if quantity < 0 or quantity > dec(p["quantity"]) or (quantity > 0 and price <= 0):
-            raise RuntimeError("成交回报无效，请核对订单")
+            raise RuntimeError("成交回报无效，系统将继续查询交易所结果")
         own = self.s["positions"].setdefault(p["key"], {"quantity": "0", "entry": "0"})
         old_q, old_p = dec(own["quantity"]), dec(own["entry"])
         if p["operation"] == "OPEN":
@@ -711,6 +714,8 @@ class Engine:
             own["quantity"] = str(old_q - quantity)
         normal_ioc = p.get("order_type") == "LIMIT" and p.get("time_in_force") == "IOC" and status in ("EXPIRED", "CANCELED")
         note = "模拟成交" if self.c["mode"] == "paper" else "交易所确认结果"
+        if p["event"].get("manual"):
+            note = ("模拟" if self.c["mode"] == "paper" else "交易所确认结果") + "；手动平仓"
         if normal_ioc:
             note = ("模拟：" if self.c["mode"] == "paper" else "") + ("限价部分成交，剩余自动取消" if quantity else "限价未成交，剩余自动取消；不转市价")
         extras = source_close_fields(p["event"], p.get("source_before"))
@@ -732,6 +737,63 @@ class Engine:
                 self.s["review_required"] = "平仓订单未完全成交，仍有剩余仓位，请人工核对后恢复"
                 self.s["error"] = self.s["review_required"]
         self.save()
+
+    def auto_resolve_pending(self):
+        """Safely reconcile an uncertain submission without operator action."""
+        if not self.s.get("pending"):
+            return True
+        try:
+            if self.c["mode"] == "paper":
+                result = self.paper_result(self.s["pending"])
+            else:
+                result = self.exchange.query(self.s["pending"])
+            self.s["error"] = None
+            self.settle(result)
+            return True
+        except Exception:
+            self.s.update(running=False,
+                error="订单结果尚未确定，系统正在自动查询；不会重复下单")
+            self.save()
+            return False
+
+    def manual_close(self, key=None):
+        """Pause copying and close one or all CopyCat-owned positions."""
+        self.stop()
+        with self.lock:
+            if self.s.get("pending"):
+                raise ValueError("仍有订单结果正在自动确认，请稍后再平仓")
+            if self.c["mode"] != "paper":
+                self.reconcile()
+            targets = [key] if key else [
+                name for name, position in self.s["positions"].items()
+                if dec(position.get("quantity", 0)) > 0
+            ]
+            if key and (key not in self.s["positions"] or dec(self.s["positions"][key].get("quantity", 0)) <= 0):
+                raise ValueError("该持仓不存在或已经平仓")
+            if not targets:
+                raise ValueError("当前没有可平的 CopyCat 持仓")
+            closed = 0
+            for name in targets:
+                symbol, side = name.rsplit(":", 1)
+                quantity = dec(self.s["positions"][name]["quantity"])
+                _, price = self.exchange.market(symbol)
+                event = {"event_id": "manual_" + uuid.uuid4().hex, "occurred_at": stamp(),
+                         "symbol": symbol, "side": side, "operation": "CLOSE",
+                         "quantity": str(quantity), "price": str(price), "manual": True}
+                pending = {"event": event, "key": name, "symbol": symbol, "operation": "CLOSE",
+                           "quantity": str(quantity), "price": str(price),
+                           "order_side": "SELL" if side == "LONG" else "BUY", "order_type": "MARKET",
+                           "limit_price": None, "time_in_force": None, "source_before": None,
+                           "client_id": "cc_manual_" + uuid.uuid4().hex[:24]}
+                self.s["pending"] = pending
+                self.save()
+                result = self.paper_result(pending) if self.c["mode"] == "paper" else self.exchange.order(pending)
+                self.settle(result)
+                if dec(self.s["source_positions"].get(name, 0)) > 0 and name not in self.s["blocked_cycles"]:
+                    self.s["blocked_cycles"].append(name)
+                    self.save()
+                closed += 1
+            return closed
 
     def resolve(self):
         with self.lock:

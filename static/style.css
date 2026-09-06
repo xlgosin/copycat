@@ -11,4 +11,5 @@
 .live-actions button{min-width:108px}
 #liveOk{background:#b2452d}
 #hedgeOk{background:#166b51}
+.danger{background:#b2452d;color:#fff}.cardhead .position-close{margin-left:auto;padding:8px 14px}
 button.linkish{display:inline;padding:0;margin-left:8px;background:none;color:#9f472c;text-decoration:underline;border-radius:0;font-size:inherit}
