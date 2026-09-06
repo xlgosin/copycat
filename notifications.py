@@ -4,22 +4,16 @@ import hashlib
 import hmac
 import os
 import time
-from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
-from dotenv import dotenv_values
 
 
-def notification_config(root):
-    path = Path(os.getenv("DINGTALK_ENV_FILE", "../binance-copy-monitor/.env"))
-    if not path.is_absolute():
-        path = root / path
-    # Import only robot credentials. Never import the old trading/HTTP settings.
-    previous = dotenv_values(path) if path.is_file() else {}
+def notification_config():
+    # app.settings loads CopyCat/.env before calling this function.
     return {"enabled": os.getenv("DINGTALK_ENABLED", "true").lower() == "true",
-            "webhook": os.getenv("DINGTALK_WEBHOOK") or previous.get("DINGTALK_WEBHOOK") or "",
-            "secret": os.getenv("DINGTALK_SECRET") or previous.get("DINGTALK_SECRET") or ""}
+            "webhook": os.getenv("DINGTALK_WEBHOOK") or "",
+            "secret": os.getenv("DINGTALK_SECRET") or ""}
 
 
 class DingTalk:
