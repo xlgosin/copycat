@@ -1,0 +1,19 @@
+[Unit]
+Description=CopyCat follow-trading web app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/copycat
+EnvironmentFile=-/opt/copycat/.env
+ExecStart=/opt/copycat/.venv/bin/python -u /opt/copycat/app.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+# App binds 0.0.0.0 by default after deploy (see HOST in .env).
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+# Collector image for hosts too old for native Playwright (e.g. CentOS 7 / glibc 2.17).
+# Keep tag in sync with playwright package major.minor from requirements-collector.txt.
+FROM mcr.microsoft.com/playwright/python:v1.62.0-jammy
+WORKDIR /opt/copycat
+COPY requirements.txt requirements-collector.txt ./
+RUN pip install --no-cache-dir -r requirements-collector.txt
+COPY collect.py ./
+CMD ["python", "-u", "collect.py"]

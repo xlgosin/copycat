@@ -1,4 +1,5 @@
 .env
+scripts/deploy.env
 .venv/
 data/
 logs/

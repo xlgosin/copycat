@@ -18,7 +18,7 @@ import requests
 from dotenv import load_dotenv
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://www.alphafox.app"
 DEFAULT_TRADER_ID = "01a00aa6-d208-71ee-8e88-0c78972b1886"
 ENDPOINTS = ("activity?limit=100", "orders?limit=100", "positions", "signal-source-positions")

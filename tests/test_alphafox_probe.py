@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from alphafox_probe import MetadataParser, initialize, save_result
+from scripts.alphafox_probe import MetadataParser, initialize, save_result
 
 
 class AlphaFoxProbeTests(unittest.TestCase):

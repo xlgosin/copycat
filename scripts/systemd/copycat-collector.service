@@ -1,0 +1,18 @@
+[Unit]
+Description=CopyCat Binance lead-trader collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/copycat
+EnvironmentFile=-/opt/copycat/.env
+ExecStart=/opt/copycat/.venv/bin/python -u /opt/copycat/collect.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

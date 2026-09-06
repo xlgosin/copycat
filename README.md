@@ -91,13 +91,7 @@ LIVE_TRADING_ENABLED=true
 
 重启后仍暂停，需要在网页确认启动实盘跟单。修改模式/密钥后务必先结束旧模式仓位。本版不是托管服务，尚未使用你的真实账户验证交易权限或真实成交。
 
-默认监听127.0.0.1，可通过SSH隧道远程使用：
-
-```bash
-ssh -L 8010:127.0.0.1:8010 用户@服务器
-```
-
-然后在本机访问 http://127.0.0.1:8010 。公开部署需在本服务前增加 HTTPS 反向代理，保留控制口令，限制入口；当前内置Web服务面向单用户控制台。只能运行一个 `python app.py`，不要配置多个执行进程；启动时文件锁防止重复执行。
+默认监听 `0.0.0.0:8010`（部署脚本会写入服务器 `.env`），浏览器访问 `http://服务器IP:8010`。公开部署请保留控制口令并视情况加 HTTPS/防火墙；当前内置 Web 面向单用户控制台。只能运行一个 `python app.py`，不要配置多个执行进程；启动时文件锁防止重复执行。
 
 ## 信号处理与异常
 
@@ -146,19 +140,46 @@ DINGTALK_SECRET=你的加签Secret
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
+### 部署为 systemd 服务
+
+本机需有 `ssh` 与 `rsync`（密码从 `deploy.env` 自动喂给 SSH，无需 sshpass）。凭证写在 gitignore 的 `scripts/deploy.env`：
+
+```bash
+cp scripts/deploy.env.example scripts/deploy.env
+# 编辑 deploy.env：DEPLOY_HOST / DEPLOY_USER / DEPLOY_PASSWORD
+bash scripts/deploy.sh
+# 覆盖服务器 .env： bash scripts/deploy.sh --env
+# 只部署跟单、不装采集器： bash scripts/deploy.sh --no-collector
+```
+
+日常分别更新：
+
+```bash
+bash scripts/update.sh env        # 或 .env —— 上传本地 .env 并重启
+bash scripts/update.sh baseline   # 或 基线 —— 上传 data/source-baseline.json
+bash scripts/update.sh app        # 或 带单 —— 同步跟单代码并重启 copycat
+```
+
+会在远程安装并启用 `copycat.service` 与 `copycat-collector.service`（默认目录 `/opt/copycat`）。
+CentOS 7 等旧系统会自动用 Docker 跑采集器。控制台默认 `HOST=0.0.0.0`，浏览器打开：
+
+```text
+http://服务器IP:8010
+```
+
 ### AlphaFox 延迟探针
 
 只读检查公开策略摘要以及登录后可见的订单、仓位和信号源仓位。首次匿名验证：
 
 ```bash
-.venv/bin/python alphafox_probe.py --once
+.venv/bin/python scripts/alphafox_probe.py --once
 ```
 
 私有接口返回 401 时，将自己已登录 AlphaFox 会话的完整 `Cookie` 请求头放入本机 `.env` 的
 `ALPHAFOX_COOKIE`（不要发给他人或提交版本库），再持续采样：
 
 ```bash
-.venv/bin/python alphafox_probe.py --interval 5
+.venv/bin/python scripts/alphafox_probe.py --interval 5
 ```
 
 结果保存在 `data/alphafox-probe.db`。`probe_runs` 保存每次请求耗时，`snapshots` 只在接口内容变化时

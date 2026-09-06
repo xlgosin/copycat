@@ -1,0 +1,24 @@
+[Unit]
+Description=CopyCat Binance lead-trader collector (Docker)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=40
+WorkingDirectory=/opt/copycat
+ExecStartPre=-/usr/bin/docker rm -f copycat-collector
+ExecStart=/usr/bin/docker run --rm --name copycat-collector \
+  --env-file /opt/copycat/.env \
+  -v /opt/copycat/data:/opt/copycat/data \
+  -v /opt/copycat/.env:/opt/copycat/.env:ro \
+  copycat-collector:latest
+ExecStop=-/usr/bin/docker stop -t 20 copycat-collector
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
