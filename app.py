@@ -14,6 +14,15 @@ from exchange import dec
 from notifications import notification_config
 
 
+def live_start_phrase(capital):
+    value = dec(capital)
+    if value == value.to_integral_value():
+        label = str(int(value))
+    else:
+        label = format(value, "f").rstrip("0").rstrip(".")
+    return f"启动{label}U实盘跟单"
+
+
 def run_worker(engine, action, interval, trading=False):
     while True:
         try:
@@ -43,7 +52,11 @@ def settings():
          "source_age": int(os.getenv("MAX_SOURCE_AGE_SECONDS", "180")),
          "deviation": dec(os.getenv("MAX_PRICE_DEVIATION_PERCENT", "1")),
          "poll": max(5, int(os.getenv("POLL_SECONDS", "5"))),
-         "live_enabled": os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true"}
+         "live_enabled": os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true",
+         "proxies": {k: v for k, v in {
+             "http": os.getenv("HTTP_PROXY", "").strip(),
+             "https": os.getenv("HTTPS_PROXY", "").strip(),
+         }.items() if v}}
     if c["testnet"] != "https://demo-fapi.binance.com":
         raise ValueError("测试网地址必须为 https://demo-fapi.binance.com，防止密钥发往其他主机")
     if not (0 < c["capital"] <= 100 and 0 < c["multiplier"] <= 3 and 1 <= c["leverage"] <= 3
@@ -92,13 +105,29 @@ def create_app(engine, token):
         except (ValueError, OverflowError):
             return jsonify(error="分页参数无效"), 400
 
+    @app.post("/api/position-mode")
+    def position_mode():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify(error="请求内容必须为 JSON 对象"), 400
+        if body.get("mode") != "one_way":
+            return jsonify(error="仅支持将持仓模式设为单向 mode=one_way"), 400
+        try:
+            engine.enable_one_way_mode()
+            return jsonify(ok=True, account=engine.account)
+        except Exception as exc:
+            engine.report_error(str(exc))
+            return jsonify(error=str(exc)), 400
+
     @app.post("/api/start")
     def start():
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return jsonify(error="请求内容必须为 JSON 对象"), 400
-        if engine.c["mode"] == "live" and body.get("confirmation") != "启动100U实盘跟单":
-            return jsonify(error="启动实盘需要输入：启动100U实盘跟单"), 400
+        if engine.c["mode"] == "live":
+            phrase = live_start_phrase(engine.c["capital"])
+            if body.get("confirmation") != phrase:
+                return jsonify(error=f"启动实盘需要输入：{phrase}"), 400
         try:
             engine.start()
             return jsonify(ok=True)

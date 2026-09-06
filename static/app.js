@@ -22,8 +22,12 @@ function render(s){
   $('mode').textContent=({paper:'模拟运行',testnet:'币安测试网',live:'真实资金 · 实盘'})[s.mode];
   $('mode').className='tag'+(s.mode==='live'?' live':'');
   $('running').textContent=s.stop_requested&&s.executor_busy?'已请求暂停 · 等待当前处理完成':s.running?'自动跟单中':'已暂停';
+  $('start').disabled=actionBusy||Boolean(s.running);
+  $('start').textContent=s.running?'跟单中':'开始跟单';
   $('updated').textContent='源数据 '+date(s.source.updated);
-  $('equity').textContent=number(s.source.equity); $('capital').textContent=number(s.capital);
+  $('equity').textContent=number(s.source.equity);   $('capital').textContent=number(s.capital);
+  const heroLine=document.querySelector('.hero p');
+  if(heroLine)heroLine.textContent=`${number(s.capital,0)} USDT 本金 · ${s.multiplier} 倍比例跟单 · 独立逐仓执行`;
   const account=s.account||{};
   if(account.error){$('wallet').textContent='—';$('walletHint').textContent=account.error}
   else{$('wallet').textContent=number(account.margin_balance);$('walletHint').textContent=(account.label||'U本位')+'权益 '+number(account.margin_balance)+' · 可用 '+number(account.available)+(account.mismatch?' · 与本金差超过5U':'')}
@@ -32,8 +36,13 @@ function render(s){
   $('credentials').textContent=(s.credentials_configured?'API凭据已配置':'未配置API凭据，模拟模式无需密钥')+' · 本服务更新 '+date(s.last_poll);
   const ding=s.dingtalk||{};
   $('credentials').textContent+=' · 钉钉'+(ding.enabled?'已启用':'未配置/未启用')+(ding.pending?'，待发 '+ding.pending+' 条':'')+(ding.error?'，'+ding.error:'');
-  const warning=s.error || (s.source_stale?'源数据已过期，请先启动网页采集；当前金额仅为历史快照。':'') || (account.mismatch?`合约账户权益 ${number(account.margin_balance)} USDT 与配置本金 ${number(s.capital)} 相差超过5U，请划转至接近预算后再开仓。`:'');
-  $('error').hidden=!warning; $('error').textContent=warning; $('resolve').hidden=!s.pending;
+  const warning=s.error || (s.source_stale?'源数据已过期，请先启动网页采集；当前金额仅为历史快照。':'') || (account.hedge_mode?'当前为双向持仓模式，开始跟单前需改为单向。':'') || (account.mismatch?`合约账户权益 ${number(account.margin_balance)} USDT 与配置本金 ${number(s.capital)} 相差超过5U，请划转至接近预算后再开仓。`:'');
+  $('error').hidden=!warning;
+  if(account.hedge_mode && !s.error && !s.source_stale){
+    $('error').innerHTML='当前为双向持仓模式，CopyCat 需要单向持仓。<button type="button" id="fixHedge" class="linkish">改为单向</button>';
+    $('fixHedge').onclick=()=>openHedgeDialog();
+  }else{$('error').textContent=warning}
+  $('resolve').hidden=!s.pending;
   $('pnl').textContent='累计平仓毛盈亏 '+number(s.realized)+' USDT';
   $('aum').textContent='源资产管理规模（仅展示）：'+number(s.source.aum)+' USDT';
   const positions=Object.entries(s.positions).filter(([,p])=>Number(p.quantity)>0);
@@ -55,9 +64,57 @@ async function action(path,body={}){
   else {actionBusy=true;$('start').disabled=true;$('resolve').disabled=true}
   try{await api(path,body);$('message').textContent=path==='stop'?'已收到暂停请求，已提交的订单仍需等待确认。':path==='start'?'启动请求已完成，请以最新运行状态为准。':'订单核对已完成。';await refresh()}
   catch(e){$('message').textContent=e.message}
-  finally{if(path==='stop')$('stop').disabled=false;else{actionBusy=false;$('start').disabled=false;$('resolve').disabled=false}}
+  finally{if(path==='stop')$('stop').disabled=false;else{actionBusy=false;$('start').disabled=Boolean(state?.running);$('start').textContent=state?.running?'跟单中':'开始跟单';$('resolve').disabled=false}}
 }
-$('start').addEventListener('click',()=>{let confirmation='';if(state?.mode==='live'){confirmation=prompt('将使用真实资金下单。请输入：启动100U实盘跟单');if(!confirmation)return}action('start',{confirmation})});
+function openLiveDialog(){
+  const phrase=state.live_confirmation||`启动${Number(state.capital)}U实盘跟单`;
+  $('livePhrase').textContent=phrase;
+  $('liveSummary').textContent=`将使用真实资金下单。当前本金 ${number(state.capital)} USDT · 倍率 ${state.multiplier}× · 敞口上限 ${number(state.max_gross)} USDT。`;
+  $('liveConfirm').value='';
+  $('liveError').hidden=true;
+  $('liveDialog').showModal();
+  $('liveConfirm').focus();
+}
+function openHedgeDialog(){
+  $('hedgeError').hidden=true;
+  $('hedgeDialog').showModal();
+}
+$('start').addEventListener('click',()=>{
+  if($('start').disabled||state?.running)return;
+  if(state?.mode!=='live'){action('start',{confirmation:''});return}
+  if(state?.account?.hedge_mode){openHedgeDialog();return}
+  openLiveDialog();
+});
+$('liveForm').addEventListener('submit',e=>{
+  const submitter=e.submitter;
+  if(submitter&&submitter.value==='cancel')return;
+  e.preventDefault();
+  const phrase=$('livePhrase').textContent;
+  const typed=$('liveConfirm').value.trim();
+  if(typed!==phrase){
+    $('liveError').hidden=false;
+    $('liveError').textContent='确认语不一致，请按上方原文输入';
+    return;
+  }
+  $('liveDialog').close();
+  action('start',{confirmation:typed});
+});
+$('hedgeForm').addEventListener('submit',async e=>{
+  const submitter=e.submitter;
+  if(submitter&&submitter.value==='cancel')return;
+  e.preventDefault();
+  $('hedgeOk').disabled=true;
+  try{
+    await api('position-mode',{mode:'one_way'});
+    $('hedgeDialog').close();
+    $('message').textContent='已切换为单向持仓，请再次点击开始跟单';
+    await refresh();
+    if(state?.mode==='live' && !state?.account?.hedge_mode) openLiveDialog();
+  }catch(err){
+    $('hedgeError').hidden=false;
+    $('hedgeError').textContent=err.message;
+  }finally{$('hedgeOk').disabled=false}
+});
 $('stop').addEventListener('click',()=>action('stop'));
 $('resolve').addEventListener('click',()=>action('reconcile'));
 $('older').addEventListener('click',async()=>{

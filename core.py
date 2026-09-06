@@ -30,7 +30,8 @@ class Engine:
         self.c = config
         self.notifier = DingTalk(config.get("dingtalk", {}))
         self.notification_lock = threading.Lock()
-        self.exchange = exchange or Binance(config["mode"], config["key"], config["secret"], config["testnet"])
+        self.exchange = exchange or Binance(config["mode"], config["key"], config["secret"], config["testnet"],
+                                           config.get("proxies") or None)
         self.lock = threading.RLock()
         self.control_lock = threading.Lock()
         self.stop_requested = threading.Event()
@@ -84,31 +85,49 @@ class Engine:
             self.s["error"] = self.s["review_required"]
         self.source = {}
         self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
-                        "updated": None, "error": None, "mismatch": False, "label": "U本位"}
+                        "updated": None, "error": None, "mismatch": False, "label": "U本位", "hedge_mode": None}
         self.refresh_account()
         self.save()
 
     def refresh_account(self):
         try:
-            if self.c["mode"] == "paper":
-                capital = str(self.c["capital"])
-                self.account = {"available": capital, "margin_balance": capital, "wallet_balance": capital,
-                                "updated": stamp(), "error": None, "mismatch": False, "label": "模拟"}
-                return
             if not (self.c["key"] and self.c["secret"]):
-                self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
-                                "updated": stamp(), "error": "未配置API凭据", "mismatch": False, "label": "U本位"}
+                if self.c["mode"] == "paper":
+                    capital = str(self.c["capital"])
+                    self.account = {"available": capital, "margin_balance": capital, "wallet_balance": capital,
+                                    "updated": stamp(), "error": None, "mismatch": False, "label": "模拟",
+                                    "hedge_mode": False}
+                else:
+                    self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
+                                    "updated": stamp(), "error": "未配置API凭据", "mismatch": False, "label": "U本位",
+                                    "hedge_mode": None}
                 return
+            # Even in paper mode, show real USD-M equity when keys exist (query only; no live orders).
             balances = self.exchange.account_balances()
             margin = dec(balances.get("margin_balance") or 0)
             mismatch = abs(margin - self.c["capital"]) > dec(5)
+            label = "U本位" if self.c["mode"] != "paper" else "U本位·仅查询"
+            try:
+                hedge = self.exchange.hedge_mode()
+            except Exception:
+                hedge = None
             self.account = {"available": str(dec(balances.get("available") or 0)),
                             "margin_balance": str(margin),
                             "wallet_balance": str(dec(balances.get("wallet_balance") or 0)),
-                            "updated": stamp(), "error": None, "mismatch": mismatch, "label": "U本位"}
+                            "updated": stamp(), "error": None, "mismatch": mismatch, "label": label,
+                            "hedge_mode": hedge}
         except Exception as exc:
             self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
-                            "updated": stamp(), "error": str(exc)[:160], "mismatch": False, "label": "U本位"}
+                            "updated": stamp(), "error": str(exc)[:160], "mismatch": False, "label": "U本位",
+                            "hedge_mode": None}
+
+    def enable_one_way_mode(self):
+        if not (self.c["key"] and self.c["secret"]):
+            raise ValueError("请先配置币安 API Key / Secret")
+        self.exchange.set_one_way_mode()
+        self.refresh_account()
+        if self.account.get("hedge_mode"):
+            raise ValueError("持仓模式仍为双向，请确认账户无持仓/挂单后再试")
 
     @contextmanager
     def connection(self):
@@ -501,8 +520,25 @@ class Engine:
         limit_price = None
         if opening:
             source_price = dec(e["price"])
-            if source_price <= 0 or abs(price / source_price - 1) * 100 > self.c["deviation"]:
-                raise ValueError("当前价格偏离源成交价格过大，跳过开仓")
+            deviation_pct = abs(price / source_price - 1) * 100 if source_price > 0 else None
+            if source_price <= 0 or deviation_pct > self.c["deviation"]:
+                def fmt(value, places=None):
+                    value = dec(value)
+                    if places is not None:
+                        value = value.quantize(dec(10) ** -places)
+                    text = format(value, "f")
+                    return text.rstrip("0").rstrip(".") if "." in text else text
+                try:
+                    last = self.exchange.last_price(e["symbol"])
+                    last_part = f"，当前价 {fmt(last)}"
+                except Exception:
+                    last_part = ""
+                if deviation_pct is None:
+                    detail = f"源成交价无效（{fmt(source_price)}），标记价 {fmt(price)}{last_part}"
+                else:
+                    detail = (f"源成交价 {fmt(source_price)}，标记价 {fmt(price)}{last_part}，"
+                              f"偏离 {fmt(deviation_pct, 4)}%（上限 {fmt(self.c['deviation'])}%）")
+                raise ValueError(f"当前价格偏离源成交价格过大，跳过开仓（{detail}）")
             quantity = dec(e["quantity"]) * self.c["capital"] / equity * self.c["multiplier"]
             limit_price = Binance.limit_price(rule, source_price, order_side)
         else:
@@ -615,6 +651,8 @@ class Engine:
             self.save()
 
     def view(self):
+        # Dashboard refresh should always re-check equity; keep Binance I/O off the trading lock.
+        self.refresh_account()
         if self.storage_error:
             result = copy.deepcopy(self.snapshot)
         elif self.lock.acquire(blocking=False):
@@ -624,6 +662,9 @@ class Engine:
                 self.lock.release()
         else:
             result = copy.deepcopy(self.snapshot)
+        result["account"] = copy.deepcopy(self.account)
+        if self.snapshot is not None:
+            self.snapshot["account"] = copy.deepcopy(self.account)
         result["stop_requested"] = self.stop_requested.is_set()
         result["order_in_flight"] = self.submitting
         if self.stop_requested.is_set():
@@ -650,6 +691,11 @@ class Engine:
             "opening_order": "LIMIT IOC · 熬鹰成交均价", "closing_order": "MARKET reduceOnly",
             "max_gross": str(self.c["max_gross"]), "leverage": self.c["leverage"], "source": self.source,
             "account": self.account,
+            "live_confirmation": (
+                f"启动{int(self.c['capital'])}U实盘跟单"
+                if self.c["capital"] == self.c["capital"].to_integral_value()
+                else f"启动{format(self.c['capital'], 'f').rstrip('0').rstrip('.')}U实盘跟单"
+            ),
             "running": self.s["running"], "error": self.s["error"], "positions": self.s["positions"],
             "records": self.s["records"][:100], "pending": bool(self.s["pending"]),
             "last_poll": self.s.get("last_poll"), "realized": self.s["realized"],

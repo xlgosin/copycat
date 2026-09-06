@@ -172,7 +172,7 @@ if __name__ == "__main__":
                 poll(page,path,portfolio)
                 if args.once:
                     break
-                time.sleep(max(60,int(os.getenv("SOURCE_POLL_SECONDS","60"))))
+                time.sleep(max(5, int(os.getenv("SOURCE_POLL_SECONDS", "60"))))
             except Exception as exc:
                 updated = datetime.now(timezone.utc).isoformat()
                 print(f"{updated} 采集失败: {type(exc).__name__}，等待300秒；查看原页是否可访问", flush=True)

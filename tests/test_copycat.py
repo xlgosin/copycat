@@ -161,7 +161,13 @@ class CopyCatTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("secret", response.get_data(as_text=True))
         self.engine.c["mode"] = "live"
+        phrase = f"启动{int(self.engine.c['capital'])}U实盘跟单"
         self.assertEqual(client.post("/api/start", headers=headers, json={}).status_code, 400)
+        wrong = client.post("/api/start", headers=headers, json={"confirmation": "启动99U实盘跟单"})
+        self.assertEqual(wrong.status_code, 400)
+        self.assertIn(phrase, wrong.get_json()["error"])
+        status = client.get("/api/status", headers=headers).get_json()
+        self.assertEqual(status["live_confirmation"], phrase)
 
     def test_rounding_and_min_notional(self):
         self.assertEqual(Binance.quantity(RULE, dec("0.12345"), dec(100), True), dec("0.123"))

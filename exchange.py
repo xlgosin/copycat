@@ -16,10 +16,12 @@ def dec(value):
 
 
 class Binance:
-    def __init__(self, mode, key="", secret="", testnet="https://demo-fapi.binance.com"):
+    def __init__(self, mode, key="", secret="", testnet="https://demo-fapi.binance.com", proxies=None):
         self.mode, self.key, self.secret = mode, key, secret
         self.base = testnet if mode == "testnet" else "https://fapi.binance.com"
         self.session = requests.Session()
+        if proxies:
+            self.session.proxies.update(proxies)
         self.rules = {}
         self.rules_time = 0
         self.cooldown = 0
@@ -71,6 +73,12 @@ class Binance:
             raise ValueError("币安价格无效")
         return rule, price
 
+    def last_price(self, symbol):
+        price = dec(self.request("GET", "/fapi/v1/ticker/price", {"symbol": symbol})["price"])
+        if price <= 0:
+            raise ValueError("币安价格无效")
+        return price
+
     @staticmethod
     def limit_price(rule, source_price, side):
         rule = next((f for f in rule["filters"] if f["filterType"] == "PRICE_FILTER"), None)
@@ -107,9 +115,15 @@ class Binance:
                 "margin_balance": account.get("totalMarginBalance"),
                 "wallet_balance": account.get("totalWalletBalance")}
 
+    def hedge_mode(self):
+        return bool(self.request("GET", "/fapi/v1/positionSide/dual", signed=True)["dualSidePosition"])
+
+    def set_one_way_mode(self):
+        return self.request("POST", "/fapi/v1/positionSide/dual", {"dualSidePosition": "false"}, True)
+
     def validate_account(self):
-        if self.request("GET", "/fapi/v1/positionSide/dual", signed=True)["dualSidePosition"]:
-            raise ValueError("本版要求单向持仓模式，请使用独立账户并自行设置")
+        if self.hedge_mode():
+            raise ValueError("本版要求单向持仓模式；可在页面确认后自动切换")
         if self.request("GET", "/fapi/v1/multiAssetsMargin", signed=True)["multiAssetsMargin"]:
             raise ValueError("本版要求单资产保证金模式")
         account = self.request("GET", "/fapi/v2/account", signed=True)
