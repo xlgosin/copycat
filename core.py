@@ -25,6 +25,14 @@ def age(value):
     return time.time() - datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
+SOURCE_HEALTH_ERRORS = (
+    "爬虫尚未采集到熬鹰账户，请先在原项目后台配置该交易员",
+    "未找到原爬虫数据库，请设置 SOURCE_DB 并启动 binance-copy-monitor",
+    "原爬虫未成功更新或数据过期，暂停跟单并检查原项目",
+    "带单账户金额已过期，暂停跟单",
+)
+
+
 def fmt_dec(value, places=None):
     value = dec(value)
     if places is not None:
@@ -345,7 +353,9 @@ class Engine:
 
     def check_source(self, profile, status):
         updated = status.get("last_success_at")
-        if status.get("last_error") or not updated or not -10 <= age(updated) <= self.c["source_age"]:
+        # A transient collector failure sets last_error while keeping the previous
+        # last_success_at. Only reject when the last success itself is missing/stale.
+        if not updated or not -10 <= age(updated) <= self.c["source_age"]:
             raise ValueError("原爬虫未成功更新或数据过期，暂停跟单并检查原项目")
         if not profile.get("captured_at") or not -10 <= age(profile["captured_at"]) <= self.c["source_age"]:
             raise ValueError("带单账户金额已过期，暂停跟单")
@@ -445,7 +455,7 @@ class Engine:
                 if generation != self.stop_generation:
                     raise ValueError("启动期间收到暂停请求，保持暂停")
                 self.stop_requested.clear()
-                self.s.update(running=True, error=None, resume_at=stamp())
+                self.s.update(running=True, error=None, resume_at=stamp(), auto_resume=True)
             self.save()
 
     def stop(self):
@@ -457,6 +467,7 @@ class Engine:
         if self.lock.acquire(blocking=False):
             try:
                 self.s["running"] = False
+                self.s["auto_resume"] = False
                 if not self.storage_error:
                     self.save()
             finally:
@@ -467,6 +478,32 @@ class Engine:
             self.s["running"] = False
             raise ValueError("已暂停，未提交此订单")
 
+    def try_auto_resume(self, profile, status):
+        """Resume after a transient source outage without requiring another UI Start."""
+        if not self.c.get("auto_resume", True):
+            return False
+        if not self.s.get("auto_resume"):
+            return False
+        if self.s["running"] or self.stop_requested.is_set():
+            return False
+        if self.s.get("review_required") or self.s.get("pending"):
+            return False
+        if self.storage_error or self.worker_error:
+            return False
+        self.check_source(profile, status)
+        if self.c["mode"] != "paper":
+            if self.c["mode"] == "live" and not self.c["live_enabled"]:
+                return False
+            if self.check_position_mode():
+                return False
+            account = self.exchange.validate_account()
+            if dec(account["totalMarginBalance"]) > self.c["capital"] + dec(5):
+                return False
+            self.reconcile()
+        self.s.update(running=True, error=None, resume_at=stamp())
+        self.record({}, "resume", "源采集已恢复，自动恢复跟单")
+        return True
+
     def tick(self):
         with self.lock:
             if self.storage_error:
@@ -475,12 +512,14 @@ class Engine:
                 profile, events, status = self.read_source()
                 self.source = {"name": profile.get("name", "熬鹰资本"), "equity": profile.get("margin_balance"),
                                "aum": profile.get("aum"), "updated": status.get("last_success_at"), "count": len(events)}
-                # Clear sticky "source missing" after collector catches up (paused ticks used to leave it).
-                if self.s.get("error") in (
-                    "爬虫尚未采集到熬鹰账户，请先在原项目后台配置该交易员",
-                    "未找到原爬虫数据库，请设置 SOURCE_DB 并启动 binance-copy-monitor",
-                ):
-                    self.s["error"] = None
+                # Clear sticky source-health errors after collector recovers.
+                if self.s.get("error") in SOURCE_HEALTH_ERRORS:
+                    try:
+                        self.check_source(profile, status)
+                    except ValueError:
+                        pass
+                    else:
+                        self.s["error"] = None
                 if not self.s["initialized"]:
                     self.establish_baseline(profile, events, status)
                     self.s["coverage_end"] = status.get("history_window_end")
@@ -562,6 +601,12 @@ class Engine:
                         break
                 self.s["last_poll"] = stamp()
                 self.s["coverage_end"] = status.get("history_window_end", self.s.get("coverage_end"))
+                # After draining while paused, resume if Start had armed auto_resume and source is healthy.
+                if not self.s["running"]:
+                    try:
+                        self.try_auto_resume(profile, status)
+                    except ValueError:
+                        pass
                 self.refresh_account()
                 self.save()
             except Exception as exc:

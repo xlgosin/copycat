@@ -193,6 +193,6 @@ if __name__ == "__main__":
                 if args.once:
                     print(str(exc)[:300], flush=True)
                     raise SystemExit(1)
-                time.sleep(300)
+                time.sleep(60)
             finally:
                 context.close()

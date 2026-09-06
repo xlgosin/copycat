@@ -97,6 +97,26 @@ class RegressionTests(unittest.TestCase):
         self.assertFalse(self.e.s["running"])
         self.assertEqual(self.e.s["positions"]["ETHUSDT:LONG"]["quantity"], "0.3")
 
+    def test_auto_resume_after_source_recovers(self):
+        self.e.c["auto_resume"] = True
+        self.assertTrue(self.e.s.get("auto_resume"))
+        self.e.s.update(running=False, error="原爬虫未成功更新或数据过期，暂停跟单并检查原项目")
+        self.f.status["last_success_at"] = stamp()
+        self.f.profile["captured_at"] = stamp()
+        self.e.tick()
+        self.assertTrue(self.e.s["running"])
+        self.assertIsNone(self.e.s.get("error"))
+        self.assertTrue(any(r.get("status") == "resume" for r in self.e.s["records"]))
+
+    def test_manual_stop_does_not_auto_resume(self):
+        self.e.c["auto_resume"] = True
+        self.e.stop()
+        self.assertFalse(self.e.s.get("auto_resume"))
+        self.f.status["last_success_at"] = stamp()
+        self.f.profile["captured_at"] = stamp()
+        self.e.tick()
+        self.assertFalse(self.e.s["running"])
+
     def test_pause_wins_over_inflight_start(self):
         self.e.stop()
         original = self.e.read_source

@@ -44,6 +44,7 @@ def settings():
          "deviation": dec(os.getenv("MAX_PRICE_DEVIATION_PERCENT", "1")),
          "poll": max(5, int(os.getenv("POLL_SECONDS", "5"))),
          "live_enabled": os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true",
+         "auto_resume": os.getenv("AUTO_RESUME_ON_SOURCE_RECOVERY", "true").lower() == "true",
          "proxies": {k: v for k, v in {
              "http": os.getenv("HTTP_PROXY", "").strip(),
              "https": os.getenv("HTTPS_PROXY", "").strip(),
