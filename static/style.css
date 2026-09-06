@@ -6,8 +6,6 @@
 .live-eyebrow{margin:0;letter-spacing:2px;font-size:11px;color:#b35a3c;font-weight:700}
 .live-dialog h2{margin:0;font-size:22px}
 .live-dialog p{margin:0}
-.live-dialog code{display:block;background:#fff0e8;color:#9f472c;padding:12px 14px;border-radius:12px;font:600 14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
-.live-dialog input{width:100%;flex:none}
 .live-error{color:#9f472c;font-size:13px}
 .live-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:8px}
 .live-actions button{min-width:108px}

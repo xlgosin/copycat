@@ -49,7 +49,16 @@ function render(s){
   $('positionList').innerHTML=positions.length?positions.map(([k,p])=>{const [symbol,side]=k.split(':');return `<article class="card"><div class="cardhead"><strong>${escape(symbol)}</strong><span class="tag">${side==='LONG'?'多头':'空头'}</span></div><div class="grid"><div><small>持仓数量</small>${number(p.quantity,8)}</div><div><small>开仓均价</small>${number(p.entry,8)}</div><div><small>开仓名义金额</small>${number(Number(p.quantity)*Number(p.entry))} USDT</div></div></article>`}).join(''):'<div class="empty">暂无跟单仓位，启动后等待新的开仓信号。</div>';
   const labels={filled:'成交',skipped:'跳过',blocked:'已阻止',baseline:'初始化',rejected:'未成交'};
   const records=historyPage?historyPage.records:s.records;
-  $('orderList').innerHTML=records.length?records.map(r=>`<article class="card"><div class="cardhead"><strong>${escape(r.symbol||'系统')}</strong><span>${r.operation==='OPEN'?'开仓':r.operation==='CLOSE'?'平仓':''} ${r.side==='LONG'?'多头':r.side==='SHORT'?'空头':''}</span><span class="tag">${escape(labels[r.status]||r.status)}</span></div><p>${escape(r.note)}</p>${r.quantity?`<p>数量 ${number(r.quantity,8)} · 成交价 ${number(r.price,8)}</p>`:''}<small>${date(r.time)}</small></article>`).join(''):'<div class="empty">暂无记录</div>';
+  $('orderList').innerHTML=records.length?records.map(r=>{
+    const bits=[];
+    if(r.operation==='CLOSE'&&r.source_quantity){
+      bits.push(`源平仓 ${number(r.source_quantity,8)} · 占源仓 ${number(r.source_close_percent,2)}%`+(r.source_before?`（平前 ${number(r.source_before,8)}）`:''));
+    }
+    if(r.quantity){
+      bits.push(`本地数量 ${number(r.quantity,8)}`+(r.price?` · 成交价 ${number(r.price,8)}`:'')+(r.local_close_percent?` · 本地平 ${number(r.local_close_percent,2)}%`:''));
+    }
+    return `<article class="card"><div class="cardhead"><strong>${escape(r.symbol||'系统')}</strong><span>${r.operation==='OPEN'?'开仓':r.operation==='CLOSE'?'平仓':''} ${r.side==='LONG'?'多头':r.side==='SHORT'?'空头':''}</span><span class="tag">${escape(labels[r.status]||r.status)}</span></div><p>${escape(r.note)}</p>${bits.map(t=>`<p>${t}</p>`).join('')}<small>${date(r.time)}</small></article>`;
+  }).join(''):'<div class="empty">暂无记录</div>';
   $('older').disabled=historyBusy || Boolean(historyPage&&!historyPage.next_before);
   $('latest').hidden=!historyPage;
 }
@@ -67,37 +76,31 @@ async function action(path,body={}){
   finally{if(path==='stop')$('stop').disabled=false;else{actionBusy=false;$('start').disabled=Boolean(state?.running);$('start').textContent=state?.running?'跟单中':'开始跟单';$('resolve').disabled=false}}
 }
 function openLiveDialog(){
-  const phrase=state.live_confirmation||`启动${Number(state.capital)}U实盘跟单`;
-  $('livePhrase').textContent=phrase;
   $('liveSummary').textContent=`将使用真实资金下单。当前本金 ${number(state.capital)} USDT · 倍率 ${state.multiplier}× · 敞口上限 ${number(state.max_gross)} USDT。`;
-  $('liveConfirm').value='';
-  $('liveError').hidden=true;
   $('liveDialog').showModal();
-  $('liveConfirm').focus();
 }
 function openHedgeDialog(){
   $('hedgeError').hidden=true;
   $('hedgeDialog').showModal();
 }
-$('start').addEventListener('click',()=>{
+$('start').addEventListener('click', async ()=>{
   if($('start').disabled||state?.running)return;
-  if(state?.mode!=='live'){action('start',{confirmation:''});return}
-  if(state?.account?.hedge_mode){openHedgeDialog();return}
-  openLiveDialog();
+  if(state?.mode!=='live'){action('start',{});return}
+  $('start').disabled=true;
+  try{
+    const mode=await api('position-mode');
+    if(state){state.account={...(state.account||{}), ...(mode.account||{}), hedge_mode:mode.hedge_mode}}
+    if(mode.hedge_mode){openHedgeDialog();return}
+    openLiveDialog();
+  }catch(e){$('message').textContent=e.message}
+  finally{$('start').disabled=Boolean(state?.running);$('start').textContent=state?.running?'跟单中':'开始跟单'}
 });
 $('liveForm').addEventListener('submit',e=>{
   const submitter=e.submitter;
   if(submitter&&submitter.value==='cancel')return;
   e.preventDefault();
-  const phrase=$('livePhrase').textContent;
-  const typed=$('liveConfirm').value.trim();
-  if(typed!==phrase){
-    $('liveError').hidden=false;
-    $('liveError').textContent='确认语不一致，请按上方原文输入';
-    return;
-  }
   $('liveDialog').close();
-  action('start',{confirmation:typed});
+  action('start',{});
 });
 $('hedgeForm').addEventListener('submit',async e=>{
   const submitter=e.submitter;

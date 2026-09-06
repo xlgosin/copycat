@@ -89,7 +89,7 @@ COPYCAT_MODE=live
 LIVE_TRADING_ENABLED=true
 ```
 
-重启后仍暂停，需要在网页输入“启动100U实盘跟单”才会启动。修改模式/密钥后务必先结束旧模式仓位。本版不是托管服务，尚未使用你的真实账户验证交易权限或真实成交。
+重启后仍暂停，需要在网页确认启动实盘跟单。修改模式/密钥后务必先结束旧模式仓位。本版不是托管服务，尚未使用你的真实账户验证交易权限或真实成交。
 
 默认监听127.0.0.1，可通过SSH隧道远程使用：
 
@@ -136,7 +136,7 @@ DINGTALK_SECRET=你的加签Secret
 
 - `GET /api/status`：运行模式、源金额、持仓、最近记录、异常。
 - `GET /api/records?limit=100&before=序号`：完整历史分页；首次省略 `before`，后续使用返回的 `next_before`，为 `null` 时无更多记录。
-- `POST /api/start`：启动；实盘JSON须包含 `{"confirmation":"启动100U实盘跟单"}`。
+- `POST /api/start`：启动跟单。
 - `POST /api/stop`：暂停所有自动交易，不平仓。
 - `POST /api/reconcile`：查询待确认订单并更新账本，查询后保持暂停。
 

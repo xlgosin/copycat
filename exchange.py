@@ -122,8 +122,6 @@ class Binance:
         return self.request("POST", "/fapi/v1/positionSide/dual", {"dualSidePosition": "false"}, True)
 
     def validate_account(self):
-        if self.hedge_mode():
-            raise ValueError("本版要求单向持仓模式；可在页面确认后自动切换")
         if self.request("GET", "/fapi/v1/multiAssetsMargin", signed=True)["multiAssetsMargin"]:
             raise ValueError("本版要求单资产保证金模式")
         account = self.request("GET", "/fapi/v2/account", signed=True)

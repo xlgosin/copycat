@@ -14,15 +14,6 @@ from exchange import dec
 from notifications import notification_config
 
 
-def live_start_phrase(capital):
-    value = dec(capital)
-    if value == value.to_integral_value():
-        label = str(int(value))
-    else:
-        label = format(value, "f").rstrip("0").rstrip(".")
-    return f"启动{label}U实盘跟单"
-
-
 def run_worker(engine, action, interval, trading=False):
     while True:
         try:
@@ -105,6 +96,14 @@ def create_app(engine, token):
         except (ValueError, OverflowError):
             return jsonify(error="分页参数无效"), 400
 
+    @app.get("/api/position-mode")
+    def get_position_mode():
+        try:
+            hedge = engine.check_position_mode()
+            return jsonify(ok=True, hedge_mode=hedge, account=engine.account)
+        except Exception as exc:
+            return jsonify(error=str(exc)), 400
+
     @app.post("/api/position-mode")
     def position_mode():
         body = request.get_json(silent=True)
@@ -122,12 +121,10 @@ def create_app(engine, token):
     @app.post("/api/start")
     def start():
         body = request.get_json(silent=True)
+        if body is None:
+            body = {}
         if not isinstance(body, dict):
             return jsonify(error="请求内容必须为 JSON 对象"), 400
-        if engine.c["mode"] == "live":
-            phrase = live_start_phrase(engine.c["capital"])
-            if body.get("confirmation") != phrase:
-                return jsonify(error=f"启动实盘需要输入：{phrase}"), 400
         try:
             engine.start()
             return jsonify(ok=True)

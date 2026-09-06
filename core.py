@@ -25,6 +25,36 @@ def age(value):
     return time.time() - datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
+def fmt_dec(value, places=None):
+    value = dec(value)
+    if places is not None:
+        value = value.quantize(dec(10) ** -places)
+    text = format(value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def source_close_fields(event, source_before):
+    if event.get("operation") != "CLOSE":
+        return {}
+    before = dec(source_before or 0)
+    qty = dec(event.get("quantity") or 0)
+    if before <= 0 or qty <= 0:
+        return {}
+    return {"source_quantity": str(qty), "source_before": str(before),
+            "source_close_percent": fmt_dec(qty / before * 100, 2)}
+
+
+def close_skip_note(reason, event, source_before, local_qty=0):
+    fields = source_close_fields(event, source_before)
+    if not fields:
+        return reason
+    note = (f"{reason}；源平仓 {fmt_dec(fields['source_quantity'])}，"
+            f"占平仓前 {fields['source_close_percent']}%")
+    if dec(local_qty) <= 0:
+        note += "；本地无跟单仓位，未平仓"
+    return note
+
+
 class Engine:
     def __init__(self, config, exchange=None):
         self.c = config
@@ -86,10 +116,15 @@ class Engine:
         self.source = {}
         self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
                         "updated": None, "error": None, "mismatch": False, "label": "U本位", "hedge_mode": None}
-        self.refresh_account()
+        self._account_refreshed_at = 0
+        self.refresh_account(force=True)
         self.save()
 
-    def refresh_account(self):
+    def refresh_account(self, force=False):
+        now = time.time()
+        if not force and self._account_refreshed_at and now - self._account_refreshed_at < 60:
+            return
+        hedge = self.account.get("hedge_mode")
         try:
             if not (self.c["key"] and self.c["secret"]):
                 if self.c["mode"] == "paper":
@@ -100,35 +135,48 @@ class Engine:
                 else:
                     self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
                                     "updated": stamp(), "error": "未配置API凭据", "mismatch": False, "label": "U本位",
-                                    "hedge_mode": None}
+                                    "hedge_mode": hedge}
+                self._account_refreshed_at = now
                 return
             # Even in paper mode, show real USD-M equity when keys exist (query only; no live orders).
+            # /fapi/v2/account at most once per minute; position mode is checked only on Start.
             balances = self.exchange.account_balances()
             margin = dec(balances.get("margin_balance") or 0)
             mismatch = abs(margin - self.c["capital"]) > dec(5)
             label = "U本位" if self.c["mode"] != "paper" else "U本位·仅查询"
-            try:
-                hedge = self.exchange.hedge_mode()
-            except Exception:
-                hedge = None
             self.account = {"available": str(dec(balances.get("available") or 0)),
                             "margin_balance": str(margin),
                             "wallet_balance": str(dec(balances.get("wallet_balance") or 0)),
                             "updated": stamp(), "error": None, "mismatch": mismatch, "label": label,
                             "hedge_mode": hedge}
+            self._account_refreshed_at = now
         except Exception as exc:
+            self._account_refreshed_at = now
             self.account = {"available": None, "margin_balance": None, "wallet_balance": None,
                             "updated": stamp(), "error": str(exc)[:160], "mismatch": False, "label": "U本位",
-                            "hedge_mode": None}
+                            "hedge_mode": hedge}
+
+    def check_position_mode(self):
+        """Fetch dual/one-way once until known one-way; not polled with account balance."""
+        if not (self.c["key"] and self.c["secret"]):
+            if self.c["mode"] == "paper":
+                self.account["hedge_mode"] = False
+                return False
+            raise ValueError("请先配置币安 API Key / Secret")
+        if self.account.get("hedge_mode") is False:
+            return False
+        hedge = self.exchange.hedge_mode()
+        self.account["hedge_mode"] = hedge
+        return hedge
 
     def enable_one_way_mode(self):
         if not (self.c["key"] and self.c["secret"]):
             raise ValueError("请先配置币安 API Key / Secret")
         self.exchange.set_one_way_mode()
-        self.refresh_account()
-        if self.account.get("hedge_mode"):
+        if self.exchange.hedge_mode():
             raise ValueError("持仓模式仍为双向，请确认账户无持仓/挂单后再试")
-
+        self.account["hedge_mode"] = False
+        self.refresh_account(force=True)
     @contextmanager
     def connection(self):
         con = sqlite3.connect(self.db, timeout=10)
@@ -387,6 +435,8 @@ class Engine:
             if self.c["mode"] != "paper":
                 if self.c["mode"] == "live" and not self.c["live_enabled"]:
                     raise ValueError("实盘未启用，请在 .env 设置 LIVE_TRADING_ENABLED=true 并重启")
+                if self.check_position_mode():
+                    raise ValueError("本版要求单向持仓模式；可在页面确认后自动切换")
                 account = self.exchange.validate_account()
                 if dec(account["totalMarginBalance"]) > self.c["capital"] + dec(5):
                     raise ValueError("请使用约100 USDT的独立合约账户；当前账户余额超出预算范围")
@@ -468,21 +518,31 @@ class Engine:
                         if self.stop_requested.is_set():
                             self.s["running"] = False
                         pre_resume = self.s.get("resume_at") and datetime.fromisoformat(e["occurred_at"]) <= datetime.fromisoformat(self.s["resume_at"])
+                        local_qty = dec(self.s["positions"].get(key, {}).get("quantity", 0))
                         if not self.s["running"] or pre_resume:
-                            if after > 0 and dec(self.s["positions"].get(key, {}).get("quantity", 0)) == 0 and key not in self.s["blocked_cycles"]:
+                            if after > 0 and local_qty == 0 and key not in self.s["blocked_cycles"]:
                                 self.s["blocked_cycles"].append(key)
                             if key in self.s["blocked_cycles"] and after == 0:
                                 self.s["blocked_cycles"].remove(key)
-                            raise ValueError("暂停期间/恢复前的信号不追单；已有跟单仓位须自行管理")
+                            raise ValueError(close_skip_note(
+                                "暂停期间/恢复前的信号不追单；已有跟单仓位须自行管理", e, before, local_qty))
                         if not -10 <= age(e["occurred_at"]) <= self.c["signal_age"]:
                             raise ValueError("信号已过期，停止跟单以免漏平仓/追历史订单")
                         if key in self.s["blocked_cycles"]:
-                            if after == 0:
-                                self.s["blocked_cycles"].remove(key)
-                            raise ValueError("启动前已有源仓位，此周期未参与")
-                        self.execute(e, key, before, equity)
+                            # Still reduce risk: copy CLOSE proportionally if we already hold.
+                            if e["operation"] == "CLOSE" and local_qty > 0:
+                                self.execute(e, key, before, equity)
+                                if after == 0:
+                                    self.s["blocked_cycles"].remove(key)
+                            else:
+                                if after == 0:
+                                    self.s["blocked_cycles"].remove(key)
+                                raise ValueError(close_skip_note(
+                                    "启动前已有源仓位，此周期未参与开仓", e, before, local_qty))
+                        else:
+                            self.execute(e, key, before, equity)
                     except ValueError as exc:
-                        self.record(e, "skipped", str(exc))
+                        self.record(e, "skipped", str(exc), **source_close_fields(e, before))
                         if self.stop_requested.is_set() and after > 0 and dec(self.s["positions"].get(key, {}).get("quantity", 0)) == 0 and key not in self.s["blocked_cycles"]:
                             self.s["blocked_cycles"].append(key)
                         if dec(self.s["positions"].get(key, {}).get("quantity", 0)) > 0 and e["operation"] == "CLOSE":
@@ -566,6 +626,7 @@ class Engine:
             "quantity": str(quantity), "price": str(price),
             "order_side": order_side, "order_type": "LIMIT" if opening else "MARKET",
             "limit_price": str(limit_price) if opening else None, "time_in_force": "IOC" if opening else None,
+            "source_before": str(source_before) if not opening else None,
             "client_id": "cc_" + hashlib.sha256((self.c["mode"] + e["event_id"]).encode()).hexdigest()[:28]}
         self.check_stopped()
         self.s["pending"] = pending
@@ -623,10 +684,17 @@ class Engine:
         note = "模拟成交" if self.c["mode"] == "paper" else "交易所确认结果"
         if normal_ioc:
             note = ("模拟：" if self.c["mode"] == "paper" else "") + ("限价部分成交，剩余自动取消" if quantity else "限价未成交，剩余自动取消；不转市价")
+        extras = source_close_fields(p["event"], p.get("source_before"))
+        if p["operation"] == "CLOSE" and old_q > 0 and quantity > 0:
+            extras["local_close_percent"] = fmt_dec(quantity / old_q * 100, 2)
+            note = (f"{note}；按源平仓比例跟平 {extras.get('source_close_percent', '?')}%"
+                    f"（本地平 {extras['local_close_percent']}%）")
+        if p["operation"] == "CLOSE":
+            extras["realized_pnl"] = str(pnl)
         self.record(p["event"], "filled" if quantity else "rejected", note,
                     quantity=str(quantity), price=str(price), client_id=p["client_id"], exchange_status=status,
                     order_type=p.get("order_type", "MARKET"), limit_price=p.get("limit_price"),
-                    **({"realized_pnl": str(pnl)} if p["operation"] == "CLOSE" else {}))
+                    **extras)
         self.s["pending"] = None
         self.s.pop("processing", None)
         if status != "FILLED" and not normal_ioc:
@@ -691,11 +759,6 @@ class Engine:
             "opening_order": "LIMIT IOC · 熬鹰成交均价", "closing_order": "MARKET reduceOnly",
             "max_gross": str(self.c["max_gross"]), "leverage": self.c["leverage"], "source": self.source,
             "account": self.account,
-            "live_confirmation": (
-                f"启动{int(self.c['capital'])}U实盘跟单"
-                if self.c["capital"] == self.c["capital"].to_integral_value()
-                else f"启动{format(self.c['capital'], 'f').rstrip('0').rstrip('.')}U实盘跟单"
-            ),
             "running": self.s["running"], "error": self.s["error"], "positions": self.s["positions"],
             "records": self.s["records"][:100], "pending": bool(self.s["pending"]),
             "last_poll": self.s.get("last_poll"), "realized": self.s["realized"],

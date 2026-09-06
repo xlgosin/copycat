@@ -50,15 +50,26 @@ class CopyCatTests(unittest.TestCase):
         self.events.append(self.event(*args, **kwargs))
         self.engine.tick()
 
-    def test_open_partial_and_full_close(self):
+    def test_blocked_cycle_still_closes_local_proportion(self):
         self.add(1)
-        p = self.engine.s["positions"]["ETHUSDT:LONG"]
-        self.assertEqual(dec(p["quantity"]), dec("0.3"))
+        self.engine.s["blocked_cycles"].append("ETHUSDT:LONG")
         self.add(2, "CLOSE", 150)
-        self.assertEqual(dec(p["quantity"]), dec("0.15"))
-        self.add(3, "CLOSE", 150)
-        self.assertEqual(dec(p["quantity"]), 0)
-        self.assertTrue(self.engine.s["running"])
+        self.assertEqual(dec(self.engine.s["positions"]["ETHUSDT:LONG"]["quantity"]), dec("0.15"))
+        filled = next(r for r in self.engine.s["records"] if r["status"] == "filled" and r["operation"] == "CLOSE")
+        self.assertEqual(filled["source_close_percent"], "50")
+        self.assertEqual(filled["local_close_percent"], "50")
+
+    def test_blocked_close_without_local_shows_source_percent(self):
+        self.engine.stop()
+        self.events.append(self.event(1))
+        self.engine.start()
+        self.add(2, "CLOSE", 300)
+        skipped = self.engine.s["records"][0]
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertEqual(skipped["source_quantity"], "300")
+        self.assertEqual(skipped["source_close_percent"], "100")
+        self.assertIn("源平仓", skipped["note"])
+        self.assertIn("本地无跟单仓位", skipped["note"])
 
     def test_short_copy_and_no_reverse_open(self):
         self.add(1, side="SHORT")
@@ -152,7 +163,7 @@ class CopyCatTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Engine({**self.c, "key": "different-account"}, Market())
 
-    def test_api_auth_secrets_and_live_confirmation(self):
+    def test_api_auth_and_start_without_phrase(self):
         client = create_app(self.engine, "control-token").test_client()
         self.assertEqual(client.get("/").status_code, 200)
         self.assertEqual(client.get("/api/status").status_code, 401)
@@ -160,14 +171,14 @@ class CopyCatTests(unittest.TestCase):
         response = client.get("/api/status", headers=headers)
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("secret", response.get_data(as_text=True))
+        self.assertNotIn("live_confirmation", response.get_json())
+        self.engine.stop()
         self.engine.c["mode"] = "live"
-        phrase = f"启动{int(self.engine.c['capital'])}U实盘跟单"
-        self.assertEqual(client.post("/api/start", headers=headers, json={}).status_code, 400)
-        wrong = client.post("/api/start", headers=headers, json={"confirmation": "启动99U实盘跟单"})
-        self.assertEqual(wrong.status_code, 400)
-        self.assertIn(phrase, wrong.get_json()["error"])
-        status = client.get("/api/status", headers=headers).get_json()
-        self.assertEqual(status["live_confirmation"], phrase)
+        self.engine.c["live_enabled"] = False
+        blocked = client.post("/api/start", headers=headers, json={})
+        self.assertEqual(blocked.status_code, 400)
+        self.assertIn("实盘未启用", blocked.get_json()["error"])
+        self.assertNotIn("确认", blocked.get_json()["error"])
 
     def test_rounding_and_min_notional(self):
         self.assertEqual(Binance.quantity(RULE, dec("0.12345"), dec(100), True), dec("0.123"))

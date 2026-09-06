@@ -61,6 +61,8 @@ def message(mode, kind, event, note, mode_capital):
              f"操作：{event.get('operation') or '—'}；本金：{mode_capital} USDT"]
     for key, label in (("quantity","本次成交数量"),("price","成交价格"),("client_id","订单编号"),
                        ("order_type","订单类型"),("limit_price","委托限价"),
+                       ("source_quantity","源平仓数量"),("source_close_percent","源平仓占比%"),
+                       ("local_close_percent","本地平仓占比%"),
                        ("exchange_status","交易所状态"),("realized_pnl","本次平仓毛盈亏USDT")):
         if event.get(key) is not None:
             lines.append(f"{label}：{event[key]}")
