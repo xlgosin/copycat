@@ -234,6 +234,12 @@ class CopyCatTests(unittest.TestCase):
         self.assertFalse(self.engine.s["pending"])
         self.assertEqual(self.engine.s["records"][0]["status"], "filled")
         self.assertEqual(self.engine.s["records"][0]["order_type"], "MARKET")
+        rec = self.engine.s["records"][0]
+        self.assertEqual(rec["source_time"], e["occurred_at"])
+        self.assertEqual(dec(rec["source_price"]), dec("99.5"))
+        self.assertEqual(dec(rec["price"]), dec("100"))
+        self.assertEqual(rec["source_quantity"], "300")
+        self.assertTrue(rec["time"])
 
     def test_limit_partial_then_proportional_close(self):
         e = self.event(1)

@@ -208,6 +208,47 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.e.start()
 
+    def test_old_fill_reads_source_time_price_from_collector(self):
+        path = Path(self.f.tmp.name) / "source.db"
+        initialize(path)
+        when = "2026-09-07T02:09:30+08:00"
+        with sqlite3.connect(path) as con:
+            con.execute("INSERT INTO trade_events VALUES(?,?,?,?,?,?,?,?)",
+                        ("lead-open-1", self.f.c["portfolio"], when, "ETHUSDT", "SHORT", "OPEN", 300, 2479.1))
+        self.e.c["source_db"] = str(path)
+        self.e.record({"event_id": "lead-open-1", "symbol": "ETHUSDT", "side": "SHORT", "operation": "OPEN"},
+                      "filled", "交易所确认结果", quantity="0.067", price="2478.5")
+        rec = next(r for r in self.e.view()["records"] if r.get("event_id") == "lead-open-1")
+        self.assertEqual(rec["source_time"], when)
+        self.assertEqual(dec(rec["source_price"]), dec("2479.1"))
+        self.assertEqual(dec(rec["source_quantity"]), dec("300"))
+        self.assertEqual(rec["price"], "2478.5")
+        self.e.save()
+        page = self.e.history(kind="trade")
+        hydrated = next(r for r in page["records"] if r.get("event_id") == "lead-open-1")
+        self.assertEqual(hydrated["source_time"], when)
+
+    def test_history_can_hide_noisy_resume_records(self):
+        for i in range(3):
+            self.e.record({}, "resume", f"resume-{i}")
+        self.e.record({"symbol": "ETHUSDT", "side": "LONG", "operation": "OPEN"}, "filled", "open")
+        self.e.save()
+        trade = self.e.history(kind="trade")
+        self.assertEqual({r["status"] for r in trade["records"]}, {"filled"})
+        self.assertEqual({r["category"] for r in trade["records"]}, {"trade"})
+        self.assertIsNone(trade["next_before"])
+        system = self.e.history(kind="system")
+        self.assertEqual({r["status"] for r in system["records"]}, {"resume", "baseline"})
+        self.assertEqual({r["category"] for r in system["records"]}, {"system"})
+        mixed = self.e.history(kind="all")
+        self.assertEqual(len(mixed["records"]), 5)
+        page = self.e.history(kind="system", limit=2)
+        self.assertEqual(len(page["records"]), 2)
+        self.assertIsNotNone(page["next_before"])
+        rest = self.e.history(before=page["next_before"], kind="system", limit=2)
+        self.assertEqual(len(rest["records"]), 2)
+        self.assertIsNone(rest["next_before"])
+
     def test_audit_history_and_pagination_survive_restart(self):
         for i in range(1100):
             self.e.record({"event_id": str(i)}, "baseline", str(i))
@@ -318,6 +359,7 @@ class RegressionTests(unittest.TestCase):
         headers = {"Authorization": "Bearer token"}
         self.assertEqual(client.get("/api/records").status_code, 401)
         self.assertEqual(client.get("/api/records?before=bad", headers=headers).status_code, 400)
+        self.assertEqual(client.get("/api/records?kind=nope", headers=headers).status_code, 400)
         self.assertEqual(client.get("/api/records", headers=headers).status_code, 200)
         self.assertEqual(client.post("/api/start", json=[1], headers=headers).status_code, 400)
 

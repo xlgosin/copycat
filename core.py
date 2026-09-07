@@ -25,6 +25,20 @@ def age(value):
     return time.time() - datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
+SYSTEM_RECORD_STATUSES = frozenset({"resume", "baseline"})
+
+
+def record_category(record_or_status):
+    if isinstance(record_or_status, dict):
+        category = record_or_status.get("category")
+        if category in ("system", "trade"):
+            return category
+        status = record_or_status.get("status")
+    else:
+        status = record_or_status
+    return "system" if status in SYSTEM_RECORD_STATUSES else "trade"
+
+
 SOURCE_HEALTH_ERRORS = (
     "爬虫尚未采集到熬鹰账户，请先在原项目后台配置该交易员",
     "未找到原爬虫数据库，请设置 SOURCE_DB 并启动 binance-copy-monitor",
@@ -314,13 +328,84 @@ class Engine:
         with self.connection() as con:
             return con.execute("SELECT 1 FROM processed_events WHERE event_id=?", (event_id,)).fetchone() is not None
 
-    def history(self, before=None, limit=100):
+    def history(self, before=None, limit=100, kind="all"):
         limit = max(1, min(int(limit), 100))
+        if kind not in ("all", "trade", "system"):
+            raise ValueError("分页参数无效")
+        start = before if before is not None else 9223372036854775807
+        if kind == "all":
+            with self.connection() as con:
+                rows = con.execute("SELECT seq,body FROM records WHERE seq < ? ORDER BY seq DESC LIMIT ?",
+                                   (start, limit + 1)).fetchall()
+            return {"records": self.enrich_source_fields([json.loads(r[1]) for r in rows[:limit]]),
+                    "next_before": rows[limit - 1][0] if len(rows) > limit else None}
+        collected = []
+        next_before = None
+        cursor = start
         with self.connection() as con:
-            rows = con.execute("SELECT seq,body FROM records WHERE seq < ? ORDER BY seq DESC LIMIT ?",
-                               (before if before is not None else 9223372036854775807, limit + 1)).fetchall()
-        return {"records": [json.loads(r[1]) for r in rows[:limit]],
-                "next_before": rows[limit-1][0] if len(rows) > limit else None}
+            while next_before is None:
+                rows = con.execute("SELECT seq,body FROM records WHERE seq < ? ORDER BY seq DESC LIMIT ?",
+                                   (cursor, 200)).fetchall()
+                if not rows:
+                    break
+                for seq, body in rows:
+                    cursor = seq
+                    rec = json.loads(body)
+                    if record_category(rec) != kind:
+                        continue
+                    collected.append((seq, rec))
+                    if len(collected) > limit:
+                        next_before = collected[limit - 1][0]
+                        break
+                if len(rows) < 200:
+                    break
+        return {"records": self.enrich_source_fields([item[1] for item in collected[:limit]]), "next_before": next_before}
+
+    def lookup_source_events(self, event_ids):
+        ids = [i for i in dict.fromkeys(event_ids) if i and not str(i).startswith("manual_")]
+        if not ids:
+            return {}
+        path = Path(self.c["source_db"]).resolve()
+        if not path.exists():
+            return {}
+        found = {}
+        try:
+            con = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+            try:
+                for i in range(0, len(ids), 200):
+                    chunk = ids[i:i + 200]
+                    marks = ",".join("?" * len(chunk))
+                    for row in con.execute(
+                        f"SELECT event_id,occurred_at,quantity,price FROM trade_events WHERE event_id IN ({marks})",
+                        chunk,
+                    ):
+                        found[row[0]] = {"occurred_at": row[1], "quantity": row[2], "price": row[3]}
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return {}
+        return found
+
+    def enrich_source_fields(self, records):
+        need = [r.get("event_id") for r in records
+                if r.get("operation") in ("OPEN", "CLOSE")
+                and (r.get("source_time") in (None, "")
+                     or r.get("source_price") in (None, "")
+                     or r.get("source_quantity") in (None, ""))]
+        sources = self.lookup_source_events(need)
+        if not sources:
+            return records
+        for rec in records:
+            src = sources.get(rec.get("event_id"))
+            if not src:
+                continue
+            if rec.get("source_time") in (None, "") and src.get("occurred_at"):
+                rec["source_time"] = src["occurred_at"]
+            if rec.get("source_price") in (None, "") and src.get("price") not in (None, ""):
+                rec["source_price"] = str(src["price"])
+            if rec.get("source_quantity") in (None, "") and src.get("quantity") not in (None, ""):
+                rec["source_quantity"] = str(src["quantity"])
+        return records
 
     def enqueue_notification(self, kind, event, note):
         if not self.notifier.enabled:
@@ -399,9 +484,19 @@ class Engine:
             con.close()
 
     def record(self, event, status, note, **extra):
-        self.s["records"].insert(0, {"record_id": uuid.uuid4().hex, "time": stamp(), "event_id": event.get("event_id"),
+        body = {"record_id": uuid.uuid4().hex, "time": stamp(), "event_id": event.get("event_id"),
              "symbol": event.get("symbol"), "side": event.get("side"),
-             "operation": event.get("operation"), "status": status, "note": note, **extra})
+             "operation": event.get("operation"), "status": status,
+             "category": record_category(status), "note": note}
+        if event and not event.get("manual"):
+            if event.get("occurred_at"):
+                body["source_time"] = event["occurred_at"]
+            if event.get("price") not in (None, ""):
+                body["source_price"] = str(event["price"])
+            if extra.get("source_quantity") is None and event.get("quantity") not in (None, ""):
+                body["source_quantity"] = str(event["quantity"])
+        body.update(extra)
+        self.s["records"].insert(0, body)
         self.new_records.append(self.s["records"][0])
         self.s["records"] = self.s["records"][:100]
         kind = ("开仓成交" if event.get("operation") == "OPEN" else "平仓成交") if status == "filled" else "跳过订单"
@@ -931,7 +1026,7 @@ class Engine:
             "max_gross": str(self.c["max_gross"]), "leverage": self.c["leverage"], "source": self.source,
             "account": self.account, "live_positions": self.live_positions,
             "running": self.s["running"], "error": self.s["error"], "positions": self.s["positions"],
-            "records": self.s["records"][:100], "pending": bool(self.s["pending"]),
+            "records": self.enrich_source_fields([dict(r) for r in self.s["records"][:100]]), "pending": bool(self.s["pending"]),
             "last_poll": self.s.get("last_poll"), "realized": self.s["realized"],
             "source_stale": source_stale,
             "dingtalk": {"enabled": self.notifier.enabled, "pending": len(self.s.get("notifications", [])),

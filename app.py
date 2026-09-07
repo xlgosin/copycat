@@ -93,7 +93,8 @@ def create_app(engine, token):
     def records():
         try:
             before = int(request.args["before"]) if "before" in request.args else None
-            return jsonify(engine.history(before, int(request.args.get("limit", 100))))
+            kind = request.args.get("kind", "all")
+            return jsonify(engine.history(before, int(request.args.get("limit", 100)), kind))
         except (ValueError, OverflowError):
             return jsonify(error="分页参数无效"), 400
 

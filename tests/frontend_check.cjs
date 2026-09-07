@@ -68,6 +68,24 @@ const { chromium } = require('playwright');
     assert.match(await page.locator('#orderList').textContent(),/older record/);
     await page.locator('#latest').click();
     assert.equal(await page.evaluate(()=>historyPage),null);
+    state.records=[
+      {time:'2026-09-07T07:21:15+08:00',note:'源采集已恢复，自动恢复跟单',status:'resume'},
+      {time:'2026-09-07T07:00:06+08:00',source_time:'2026-09-07T07:00:00+08:00',source_price:'2479.1',
+        source_quantity:'300',note:'成交记录',status:'filled',symbol:'ETHUSDT',operation:'OPEN',side:'LONG',
+        quantity:'0.067',price:'2478.5'}
+    ];
+    await page.evaluate(()=>refresh());
+    await page.locator('[data-tab=orders]').click();
+    const defaultText=await page.locator('#orderList').textContent();
+    assert.match(defaultText,/成交记录/);
+    assert.match(defaultText,/跟单人/);
+    assert.match(defaultText,/我/);
+    assert.equal(defaultText.includes('源采集已恢复'), false);
+    assert.match(await page.locator('#recordHint').textContent(),/折叠/);
+    await page.locator('[data-kind=system]').click();
+    assert.match(await page.locator('#orderList').textContent(),/源采集已恢复/);
+    await page.locator('[data-kind=trade]').click();
+    assert.equal((await page.locator('#orderList').textContent()).includes('源采集已恢复'), false);
     for(const width of [375,1440]) {
       await page.setViewportSize({width,height:1000});
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));

@@ -1,4 +1,4 @@
-let token = localStorage.getItem('copycat_admin_token') || '', state = null, busy = false, actionBusy = false, historyBusy = false, historyPage = null, closeKey = null;
+let token = localStorage.getItem('copycat_admin_token') || '', state = null, busy = false, actionBusy = false, historyBusy = false, historyPage = null, closeKey = null, recordKind = 'trade';
 const $ = id => document.getElementById(id);
 const number = (n, digits=2) => n == null ? '—' : Number(n).toLocaleString('zh-CN',{maximumFractionDigits:digits});
 const escape = x => String(x ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -63,18 +63,25 @@ function render(s){
     const status=L.error?escape(L.error):(L.status||'持有中');
     return `<article class="card"><div class="cardhead"><strong>${escape(symbol)}</strong><span class="tag">${side==='LONG'?'多头':'空头'}</span><span class="tag">${status}</span><button class="danger position-close" data-key="${escape(k)}">平仓</button></div><div class="grid"><div><small>持仓数量</small>${number(p.quantity,8)}</div><div><small>开仓均价</small>${number(p.entry,8)}</div><div><small>标记价格</small>${mark}</div><div><small>当前名义金额</small>${notional} USDT</div><div><small>未实现盈亏</small>${L.unrealized_pnl!=null?signed(L.unrealized_pnl)+' USDT':'—'}</div><div><small>收益率</small>${roe}</div><div><small>逐仓保证金</small>${margin}</div><div><small>杠杆</small>${lev}</div><div><small>强平价</small>${liq}</div></div></article>`;
   }).join(''):'<div class="empty">暂无跟单仓位，启动后等待新的开仓信号。</div>';
-  const labels={filled:'成交',skipped:'跳过',blocked:'已阻止',baseline:'初始化',rejected:'未成交'};
+  const labels={filled:'成交',skipped:'跳过',blocked:'已阻止',baseline:'初始化',rejected:'未成交',resume:'自动恢复'};
+  const categoryOf=r=>r.category==='system'||r.category==='trade'?r.category:(r.status==='resume'||r.status==='baseline'?'system':'trade');
   const records=historyPage?historyPage.records:s.records;
-  $('orderList').innerHTML=records.length?records.map(r=>{
-    const bits=[];
-    if(r.operation==='CLOSE'&&r.source_quantity){
-      bits.push(`源平仓 ${number(r.source_quantity,8)} · 占源仓 ${number(r.source_close_percent,2)}%`+(r.source_before?`（平前 ${number(r.source_before,8)}）`:''));
-    }
-    if(r.quantity){
-      bits.push(`本地数量 ${number(r.quantity,8)}`+(r.price?` · 成交价 ${number(r.price,8)}`:'')+(r.local_close_percent?` · 本地平 ${number(r.local_close_percent,2)}%`:''));
-    }
-    return `<article class="card"><div class="cardhead"><strong>${escape(r.symbol||'系统')}</strong><span>${r.operation==='OPEN'?'开仓':r.operation==='CLOSE'?'平仓':''} ${r.side==='LONG'?'多头':r.side==='SHORT'?'空头':''}</span><span class="tag">${escape(labels[r.status]||r.status)}</span></div><p>${escape(r.note)}</p>${bits.map(t=>`<p>${t}</p>`).join('')}<small>${date(r.time)}</small></article>`;
-  }).join(''):'<div class="empty">暂无记录</div>';
+  const hiddenSystem=recordKind==='trade'?(records||[]).filter(r=>categoryOf(r)==='system').length:0;
+  const shown=(records||[]).filter(r=>recordKind==='all'||categoryOf(r)===recordKind);
+  $('recordHint').textContent=hiddenSystem?`已折叠 ${hiddenSystem} 条系统日志，点筛选查看`:(recordKind==='system'?'只显示系统日志':'系统日志默认折叠');
+  document.querySelectorAll('.record-filter').forEach(x=>x.classList.toggle('active',x.dataset.kind===recordKind));
+  $('orderList').innerHTML=shown.length?shown.map(r=>{
+    const system=categoryOf(r)==='system';
+    const metric=(label,value)=>`<div class="metric"><small>${label}</small>${value}</div>`;
+    const delay=(()=>{
+      if(!r.source_time||!r.time) return '';
+      const ms=new Date(r.time)-new Date(r.source_time);
+      if(!Number.isFinite(ms)) return '';
+      return ms>=1000?`跟单延迟 ${(ms/1000).toFixed(1)} 秒`:`跟单延迟 ${Math.max(0,Math.round(ms))} 毫秒`;
+    })();
+    const compare=!system&&(r.operation==='OPEN'||r.operation==='CLOSE')?`<div class="compare"><div><small>跟单人</small>${metric('时间',r.source_time?date(r.source_time):'—')}${metric('价格',r.source_price!=null&&r.source_price!==''?number(r.source_price,8):'—')}${metric('数量',r.source_quantity!=null&&r.source_quantity!==''?number(r.source_quantity,8):'—')}${r.source_close_percent!=null?metric('平仓占比',number(r.source_close_percent,2)+'%'):''}</div><div><small>我</small>${metric('时间',date(r.time))}${metric('价格',r.price!=null&&r.price!==''?number(r.price,8):'—')}${metric('数量',r.quantity!=null&&r.quantity!==''?number(r.quantity,8):'—')}${r.local_close_percent!=null?metric('平仓占比',number(r.local_close_percent,2)+'%'):''}</div></div>${delay?`<small>${delay}</small>`:''}`:'';
+    return `<article class="card${system?' system-log':''}"><div class="cardhead"><strong>${escape(r.symbol||'系统')}</strong><span>${r.operation==='OPEN'?'开仓':r.operation==='CLOSE'?'平仓':''} ${r.side==='LONG'?'多头':r.side==='SHORT'?'空头':''}</span>${system?'<span class="tag">系统</span>':''}<span class="tag">${escape(labels[r.status]||r.status)}</span></div><p>${escape(r.note)}</p>${compare}</article>`;
+  }).join(''):'<div class="empty">'+(recordKind==='system'?'暂无系统日志':'暂无记录')+'</div>';
   $('older').disabled=historyBusy || Boolean(historyPage&&!historyPage.next_before);
   $('latest').hidden=!historyPage;
 }
@@ -153,12 +160,26 @@ $('closeForm').addEventListener('submit',e=>{
   const key=closeKey;closeKey=null;
   action(key?'close-position':'close-all',key?{key}:{});
 });
+function recordsPath(before){
+  const params=new URLSearchParams();
+  if(recordKind && recordKind!=='all') params.set('kind', recordKind);
+  if(before!=null) params.set('before', before);
+  const query=params.toString();
+  return 'records'+(query?'?'+query:'');
+}
+$('recordFilters').addEventListener('click',e=>{
+  const button=e.target.closest('[data-kind]');
+  if(!button||button.dataset.kind===recordKind) return;
+  recordKind=button.dataset.kind;
+  historyPage=null;
+  if(state) render(state);
+});
 $('older').addEventListener('click',async()=>{
   if(historyBusy)return;
   historyBusy=true;$('older').disabled=true;
   try{
-    if(!historyPage)historyPage=await api('records');
-    if(historyPage.next_before)historyPage=await api('records?before='+historyPage.next_before);
+    if(!historyPage)historyPage=await api(recordsPath());
+    if(historyPage.next_before)historyPage=await api(recordsPath(historyPage.next_before));
   }catch(e){$('message').textContent=e.message}
   finally{historyBusy=false;if(state)render(state)}
 });
