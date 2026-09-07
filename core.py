@@ -524,11 +524,17 @@ class Engine:
 
     def check_source(self, profile, status):
         updated = status.get("last_success_at")
-        # A transient collector failure sets last_error while keeping the previous
-        # last_success_at. Only reject when the last success itself is missing/stale.
-        if not updated or not -10 <= age(updated) <= self.c["source_age"]:
+        captured = profile.get("captured_at")
+        def fresh(value):
+            try:
+                return bool(value) and -10 <= age(value) <= self.c["source_age"]
+            except (ValueError, TypeError):
+                return False
+        # last_success_at used to be the query-window start. A slow Playwright poll
+        # could finish successfully yet look expired. captured_at is written at completion.
+        if not fresh(updated) and not fresh(captured):
             raise ValueError("源采集暂时中断或数据过期，已暂停跟单；恢复后将自动继续")
-        if not profile.get("captured_at") or not -10 <= age(profile["captured_at"]) <= self.c["source_age"]:
+        if not fresh(captured):
             raise ValueError("带单账户金额已过期，已暂停跟单；恢复后将自动继续")
         equity = dec(profile.get("margin_balance") or 0)
         if equity <= 0:
@@ -686,8 +692,9 @@ class Engine:
                 if self.s.get("pending") and not self.auto_resolve_pending():
                     return
                 profile, events, status = self.read_source()
+                heartbeat = profile.get("captured_at") or status.get("last_success_at")
                 self.source = {"name": profile.get("name", "熬鹰资本"), "equity": profile.get("margin_balance"),
-                               "aum": profile.get("aum"), "updated": status.get("last_success_at"), "count": len(events)}
+                               "aum": profile.get("aum"), "updated": heartbeat, "count": len(events)}
                 # Clear sticky source-health errors after collector recovers.
                 if self.s.get("error") in SOURCE_HEALTH_ERRORS:
                     try:

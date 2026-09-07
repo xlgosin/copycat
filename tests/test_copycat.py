@@ -121,6 +121,7 @@ class CopyCatTests(unittest.TestCase):
         self.assertFalse(self.engine.s["positions"])
         self.profile["margin_balance"] = 300000
         self.status["last_success_at"] = "2020-01-01T00:00:00+00:00"
+        self.profile["captured_at"] = "2020-01-01T00:00:00+00:00"
         with self.assertRaises(ValueError):
             self.engine.start()
 

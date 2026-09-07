@@ -97,6 +97,23 @@ class RegressionTests(unittest.TestCase):
         self.assertFalse(self.e.s["running"])
         self.assertEqual(self.e.s["positions"]["ETHUSDT:LONG"]["quantity"], "0.3")
 
+    def test_slow_collector_poll_does_not_pause_when_equity_is_fresh(self):
+        self.e.s.update(running=True, auto_resume=True, error=None)
+        self.f.status["last_success_at"] = (datetime.now(timezone.utc) - timedelta(seconds=400)).isoformat()
+        self.f.profile["captured_at"] = stamp()
+        self.e.tick()
+        self.assertTrue(self.e.s["running"])
+        self.assertIsNone(self.e.s["error"])
+
+    def test_stale_source_pauses_when_equity_and_success_are_old(self):
+        self.e.s.update(running=True, auto_resume=True, error=None)
+        old = "2020-01-01T00:00:00+00:00"
+        self.f.status["last_success_at"] = old
+        self.f.profile["captured_at"] = old
+        self.e.tick()
+        self.assertFalse(self.e.s["running"])
+        self.assertIn("源采集暂时中断", self.e.s["error"])
+
     def test_auto_resume_after_source_recovers(self):
         self.e.c["auto_resume"] = True
         self.assertTrue(self.e.s.get("auto_resume"))
@@ -351,8 +368,13 @@ class RegressionTests(unittest.TestCase):
         self.assertLess(payload["startTime"], int(datetime.fromisoformat(old).timestamp() * 1000))
         with sqlite3.connect(path) as con:
             status = json.loads(con.execute("SELECT value_json FROM runtime_state").fetchone()[0])
+            profile = json.loads(con.execute("SELECT data_json FROM trader_state").fetchone()[0])
         self.assertFalse(status["history_complete"])
         self.assertEqual(status["history_window_start"], old)
+        self.assertEqual(status["last_success_at"], profile["captured_at"])
+        success = datetime.fromisoformat(status["last_success_at"].replace("Z", "+00:00"))
+        self.assertEqual(success.utcoffset(), timedelta(0))
+        self.assertLess(abs(datetime.now(timezone.utc).timestamp() - success.timestamp()), 5)
 
     def test_records_api_auth_and_bad_start_body(self):
         client = create_app(self.e, "token").test_client()

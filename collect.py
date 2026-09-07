@@ -149,9 +149,9 @@ def poll(page, path, portfolio):
     else:
         raise ValueError("历史超过单次拉取上限，当前窗口不完整；改用原爬虫数据或缩小历史窗口后人工检查")
     events = parse_orders(items, portfolio)
-    updated = datetime.now(timezone.utc).isoformat()
+    completed = datetime.now(timezone.utc).isoformat()
     profile = {"name": page.locator("h1").first.inner_text(), "margin_balance": equity,
-               "aum": amount(r"(?:資產管理規模|资产管理规模|AUM)"), "captured_at": updated}
+               "aum": amount(r"(?:資產管理規模|资产管理规模|AUM)"), "captured_at": completed}
     if baseline:
         profile["position_baseline"] = baseline
     window_start = previous.get("history_window_start") or coverage_start.isoformat()
@@ -161,13 +161,13 @@ def poll(page, path, portfolio):
             if old and (old[0] != e["quantity"] or old[1] != e["price"]):
                 raise ValueError("已记录订单的累计成交发生变化，请人工核查")
             con.execute("INSERT OR IGNORE INTO trade_events VALUES(:event_id,:portfolio_id,:occurred_at,:symbol,:side,:operation,:quantity,:price)", e)
-        con.execute("INSERT OR REPLACE INTO trader_state VALUES(?,?,?)", (portfolio,json.dumps(profile),updated))
+        con.execute("INSERT OR REPLACE INTO trader_state VALUES(?,?,?)", (portfolio,json.dumps(profile),completed))
         con.execute("INSERT OR REPLACE INTO runtime_state VALUES(?,?,?)",
-                    ("collector_status:"+portfolio,json.dumps({"last_success_at": end.isoformat(), "last_error":None,
+                    ("collector_status:"+portfolio,json.dumps({"last_success_at": completed, "last_error":None,
                      "history_complete": False,
                      "history_window_start": window_start,
-                     "history_window_end": end.isoformat()}),updated))
-    print(f"{updated} 熬鹰余额 {equity} USDT，读取 {len(events)} 条历史", flush=True)
+                     "history_window_end": end.isoformat()}),completed))
+    print(f"{completed} 熬鹰余额 {equity} USDT，读取 {len(events)} 条历史", flush=True)
 
 
 if __name__ == "__main__":
