@@ -6,3 +6,4 @@ logs/
 .runtime/
 __pycache__/
 *.pyc
+tests/
