@@ -294,6 +294,14 @@ else
   systemctl disable --now copycat-collector.service >/dev/null 2>&1 || true
 fi
 
+# The standalone collector above writes data/source.db, so the legacy Compose
+# collector is redundant. Its long-lived Playwright renderer can retain several
+# GB of memory and its unless-stopped policy otherwise keeps it alive forever.
+if [[ "\$COLLECTOR_MODE" != "none" ]] && docker inspect binance-copy-monitor >/dev/null 2>&1; then
+  echo "停止已被独立采集器替代的旧容器 binance-copy-monitor..."
+  docker stop binance-copy-monitor >/dev/null
+fi
+
 systemctl --no-pager --full status copycat.service || true
 if [[ "\$COLLECTOR_MODE" != "none" ]]; then
   systemctl --no-pager --full status copycat-collector.service || true

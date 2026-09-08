@@ -111,9 +111,15 @@ class Engine:
             "positions": {}, "records": [], "pending": None, "realized": 0, "fees": 0,
             "blocked_cycles": [], "last_event_time": ""}
         identity = hashlib.sha256(json.dumps({k: str(config[k]) for k in
-            ("mode", "source_db", "portfolio", "capital", "multiplier", "leverage", "key")}, sort_keys=True).encode()).hexdigest()
-        if self.s.get("identity") and self.s["identity"] != identity:
-            raise ValueError("配置/账户身份与现有账本不同。先核对并平完旧仓位，归档 data 中对应模式数据库后再变更")
+            ("mode", "source_db", "portfolio", "capital", "multiplier", "key")}, sort_keys=True).encode()).hexdigest()
+        stored = self.s.get("identity")
+        if stored and stored != identity:
+            def hashed(cfg, keys):
+                return hashlib.sha256(json.dumps({k: str(cfg[k]) for k in keys}, sort_keys=True).encode()).hexdigest()
+            keys = ("mode", "source_db", "portfolio", "capital", "multiplier", "leverage", "key")
+            leverage_only = any(stored == hashed({**config, "leverage": lev}, keys) for lev in range(1, 21))
+            if stored != hashed(config, keys) and not leverage_only:
+                raise ValueError("配置/账户身份与现有账本不同。先核对并平完旧仓位，归档 data 中对应模式数据库后再变更")
         self.s["identity"] = identity
         # Migrate the old bounded history once, in the same transaction as state.
         self.new_seen.update(self.s.pop("seen", []))

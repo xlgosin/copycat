@@ -38,7 +38,7 @@ def settings():
          "key": os.getenv("BINANCE_API_KEY", ""), "secret": os.getenv("BINANCE_API_SECRET", ""),
          "testnet": os.getenv("BINANCE_TESTNET_URL", "https://demo-fapi.binance.com"),
          "capital": dec(os.getenv("COPY_CAPITAL", "100")), "multiplier": dec(os.getenv("COPY_MULTIPLIER", "3")),
-         "leverage": int(os.getenv("FUTURES_LEVERAGE", "3")), "max_gross": dec(os.getenv("MAX_GROSS_NOTIONAL", "300")),
+         "leverage": int(os.getenv("FUTURES_LEVERAGE", "5")), "max_gross": dec(os.getenv("MAX_GROSS_NOTIONAL", "500")),
          "signal_age": int(os.getenv("MAX_SIGNAL_AGE_SECONDS", "180")),
          "source_age": int(os.getenv("MAX_SOURCE_AGE_SECONDS", "300")),
          "deviation": dec(os.getenv("MAX_PRICE_DEVIATION_PERCENT", "1")),
@@ -51,10 +51,10 @@ def settings():
          }.items() if v}}
     if c["testnet"] != "https://demo-fapi.binance.com":
         raise ValueError("测试网地址必须为 https://demo-fapi.binance.com，防止密钥发往其他主机")
-    if not (0 < c["capital"] <= 100 and 0 < c["multiplier"] <= 3 and 1 <= c["leverage"] <= 3
-            and 0 < c["max_gross"] <= c["capital"] * 3 and 0 < c["deviation"] <= 5
+    if not (0 < c["capital"] <= 100 and 0 < c["multiplier"] <= 3 and 1 <= c["leverage"] <= 5
+            and 0 < c["max_gross"] <= c["capital"] * c["leverage"] and 0 < c["deviation"] <= 5
             and c["source_age"] > 0 and c["signal_age"] > 0):
-        raise ValueError("本版预算最多100U，倍率/杠杆最多3，总敞口最多本金3倍；时效参数须为正")
+        raise ValueError("本版预算最多100U，跟单倍率最多3，合约杠杆最多5，总敞口最多本金×杠杆；时效参数须为正")
     c["dingtalk"] = notification_config()
     return c
 
