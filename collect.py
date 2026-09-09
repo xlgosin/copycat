@@ -37,9 +37,11 @@ def parse_orders(items, portfolio):
         side = item.get("positionSide")
         operation = actions.get((side, item.get("side")))
         if not operation:
-            raise ValueError("源订单方向无法识别")
+            continue
         if item.get("status") and item["status"] != "FILLED":
-            raise ValueError("源订单尚未完全成交，暂停采集发布以免重复跟随累计数量")
+            # Keep collecting; publish this immutable order ID only after its
+            # final FILLED quantity is available.
+            continue
         qty, price = float(item.get("executedQty") or 0), float(item.get("avgPrice") or 0)
         if not math.isfinite(qty) or not math.isfinite(price) or qty <= 0 or price <= 0:
             raise ValueError("源订单成交数量/价格无效")

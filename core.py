@@ -134,6 +134,10 @@ class Engine:
         self.notification_cache = {item["id"]: json.dumps(item) for item in queue}
         self.s["records"] = legacy_records[:100] if legacy_records else records
         self.s["realized"] = str(dec(self.s["realized"]))
+        # Event IDs are the sole cycle/deduplication authority. Older versions
+        # blocked an entire symbol cycle after a pause and required manual
+        # management; keep no such sticky state after upgrading.
+        self.s["blocked_cycles"] = []
         if self.s.get("processing") and not self.s.get("pending"):
             self.s["review_required"] = "上次进程在处理信号时中断，请人工核对后归档账本重新初始化"
         self.s.update(running=False, error=None)
@@ -521,8 +525,11 @@ class Engine:
             raise ValueError("信号数量无效")
         before = dec(self.s["source_positions"].get(key, 0))
         if e["operation"] == "CLOSE" and quantity > before:
-            self.s["review_required"] = "源平仓数量超过已知仓位，历史不完整；请核对源仓位基线"
-            raise ValueError(self.s["review_required"])
+            # Order ID still makes this event safe to process exactly once. If
+            # older source history is incomplete, treat it as a full reduction
+            # of the known cycle so any CopyCat-owned position is closed rather
+            # than stopping for manual intervention.
+            before = quantity
         after = before + quantity if e["operation"] == "OPEN" else before - quantity
         self.s["source_positions"][key] = str(after)
         return key, before, after
@@ -742,12 +749,9 @@ class Engine:
                     if self.s.get("baseline_as_of") and datetime.fromisoformat(e["occurred_at"]) <= datetime.fromisoformat(self.s["baseline_as_of"]):
                         self.consume(e)
                         continue
-                    if e["occurred_at"] < self.s["last_event_time"]:
-                        self.consume(e)
-                        self.s.update(running=False, error="发现补录/乱序历史成交，请核查源仓位，停止自动跟单")
-                        self.s["review_required"] = self.s["error"]
-                        self.record(e, "blocked", self.s["error"])
-                        self.save()
+                    # Do not consume an unseen order while temporarily stopped.
+                    # It remains queued and is handled after automatic recovery.
+                    if not self.s["running"]:
                         break
                     key, before, after = self.source_step(e)
                     self.consume(e)
@@ -755,48 +759,10 @@ class Engine:
                     self.s["processing"] = e["event_id"]
                     self.save()
                     try:
-                        if self.stop_requested.is_set():
-                            self.s["running"] = False
-                        pre_resume = self.s.get("resume_at") and datetime.fromisoformat(e["occurred_at"]) <= datetime.fromisoformat(self.s["resume_at"])
-                        local_qty = dec(self.s["positions"].get(key, {}).get("quantity", 0))
-                        # 恢复前发生、恢复后才被采集到的开仓不追；但已有本地仓位的
-                        # 平仓必须继续按比例执行以降低风险。否则采集短暂中断后，延迟
-                        # 到达的 CLOSE 会被跳过并把账户永久锁进 review_required。
-                        delayed_risk_reduce = (bool(pre_resume) and self.s["running"] and
-                                               e["operation"] == "CLOSE" and local_qty > 0)
-                        if not self.s["running"] or (pre_resume and not delayed_risk_reduce):
-                            if after > 0 and local_qty == 0 and key not in self.s["blocked_cycles"]:
-                                self.s["blocked_cycles"].append(key)
-                            if key in self.s["blocked_cycles"] and after == 0:
-                                self.s["blocked_cycles"].remove(key)
-                            raise ValueError(close_skip_note(
-                                "暂停期间/恢复前的信号不追单；已有跟单仓位须自行管理", e, before, local_qty))
-                        # Never chase a stale OPEN. A stale CLOSE for a position we
-                        # actually own is risk reduction and remains actionable.
-                        if (not -10 <= age(e["occurred_at"]) <= self.c["signal_age"] and
-                                not (e["operation"] == "CLOSE" and local_qty > 0)):
-                            raise ValueError("信号已过期，停止跟单以免漏平仓/追历史订单")
-                        if key in self.s["blocked_cycles"]:
-                            # Still reduce risk: copy CLOSE proportionally if we already hold.
-                            if e["operation"] == "CLOSE" and local_qty > 0:
-                                self.execute(e, key, before, equity)
-                                if after == 0:
-                                    self.s["blocked_cycles"].remove(key)
-                            else:
-                                if after == 0:
-                                    self.s["blocked_cycles"].remove(key)
-                                raise ValueError(close_skip_note(
-                                    "启动前已有源仓位，此周期未参与开仓", e, before, local_qty))
-                        else:
-                            self.execute(e, key, before, equity)
+                        self.check_stopped()
+                        self.execute(e, key, before, equity)
                     except ValueError as exc:
                         self.record(e, "skipped", str(exc), **source_close_fields(e, before))
-                        if self.stop_requested.is_set() and after > 0 and dec(self.s["positions"].get(key, {}).get("quantity", 0)) == 0 and key not in self.s["blocked_cycles"]:
-                            self.s["blocked_cycles"].append(key)
-                        # 可确定结果的 CLOSE 跳过不再制造永久人工锁。保留账本仓位，
-                        # 后续源减仓继续按剩余比例执行；源完全平仓时本地也会完全平仓。
-                        if "过期" in str(exc):
-                            self.s.update(running=False, error=str(exc))
                     self.s.pop("processing", None)
                     self.save()
                     if self.s["pending"] or self.s.get("error"):
