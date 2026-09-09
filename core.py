@@ -106,6 +106,18 @@ class Engine:
             con.execute("CREATE TABLE IF NOT EXISTS processed_events (event_id TEXT PRIMARY KEY)")
             con.execute("CREATE TABLE IF NOT EXISTS records (seq INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT UNIQUE NOT NULL, body TEXT NOT NULL)")
             con.execute("CREATE TABLE IF NOT EXISTS notification_queue (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, body TEXT NOT NULL)")
+            # One source order has one visible final result. Keep the newest
+            # record when an earlier skip/rejection was later auto-corrected.
+            seen_event_ids, obsolete = set(), []
+            for seq, body in con.execute("SELECT seq,body FROM records ORDER BY seq DESC"):
+                event_id = json.loads(body).get("event_id")
+                if not event_id:
+                    continue
+                if event_id in seen_event_ids:
+                    obsolete.append((seq,))
+                else:
+                    seen_event_ids.add(event_id)
+            con.executemany("DELETE FROM records WHERE seq=?", obsolete)
             row = con.execute("SELECT body FROM state WHERE id=1").fetchone()
         self.s = json.loads(row[0]) if row else {"initialized": False, "seen": [], "source_positions": {},
             "positions": {}, "records": [], "pending": None, "realized": 0, "fees": 0,
@@ -313,6 +325,8 @@ class Engine:
         try:
             with self.connection() as con:
                 con.executemany("INSERT OR IGNORE INTO processed_events VALUES(?)", [(e,) for e in self.new_seen])
+                con.executemany("DELETE FROM records WHERE json_extract(body, '$.event_id')=?",
+                                [(r["event_id"],) for r in self.new_records if r.get("event_id")])
                 con.executemany("INSERT OR IGNORE INTO records(record_id,body) VALUES(?,?)",
                                 [(r["record_id"], json.dumps(r)) for r in self.new_records])
                 notifications = {item["id"]: json.dumps(item) for item in self.s.get("notifications", [])}
@@ -505,6 +519,8 @@ class Engine:
             if extra.get("source_quantity") is None and event.get("quantity") not in (None, ""):
                 body["source_quantity"] = str(event["quantity"])
         body.update(extra)
+        if body.get("event_id"):
+            self.s["records"] = [r for r in self.s["records"] if r.get("event_id") != body["event_id"]]
         self.s["records"].insert(0, body)
         self.new_records.append(self.s["records"][0])
         self.s["records"] = self.s["records"][:100]
