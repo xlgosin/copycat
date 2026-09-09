@@ -17,6 +17,18 @@ BASE = "https://www.binance.com/bapi/futures/v1/friendly/future/copy-trade/"
 SHANGHAI = timezone(timedelta(hours=8))
 
 
+def restart_due(last_success_at, started_at, threshold, now=None):
+    """Return true after the source has had no successful poll for threshold seconds."""
+    now = time.time() if now is None else now
+    since = started_at
+    if last_success_at:
+        try:
+            since = datetime.fromisoformat(last_success_at.replace("Z", "+00:00")).timestamp()
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return now - since >= threshold
+
+
 def parse_orders(items, portfolio):
     actions = {("LONG", "BUY"): "OPEN", ("LONG", "SELL"): "CLOSE",
                ("SHORT", "SELL"): "OPEN", ("SHORT", "BUY"): "CLOSE"}
@@ -183,6 +195,8 @@ if __name__ == "__main__":
     portfolio = os.getenv("PORTFOLIO_ID", "5075281354358777856")
     if not portfolio.isdigit():
         raise SystemExit("交易员ID无效")
+    collector_started = time.time()
+    restart_after = max(60, int(os.getenv("SOURCE_RESTART_AFTER_SECONDS", "60")))
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         while True:
@@ -209,6 +223,9 @@ if __name__ == "__main__":
                 if args.once:
                     print(str(exc)[:300], flush=True)
                     raise SystemExit(1)
+                if restart_due(status.get("last_success_at"), collector_started, restart_after):
+                    print(f"连续{restart_after}秒未成功采集，退出并交由 systemd 重启容器", flush=True)
+                    raise SystemExit(2)
                 time.sleep(wait)
             finally:
                 context.close()

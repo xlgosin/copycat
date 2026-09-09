@@ -30,9 +30,10 @@ Linux 缺少系统浏览器依赖时按 Playwright 提示安装；可使用 `pyt
 SOURCE_DB=data/source.db
 STANDALONE_SOURCE_DB=data/source.db
 SOURCE_POLL_SECONDS=10
+SOURCE_RESTART_AFTER_SECONDS=60
 ```
 
-先运行 `.venv/bin/python collect.py --once` 验证页面和金额可读取；成功后，一个终端运行 `.venv/bin/python collect.py`，另一个终端运行 `sh start.sh`。自带爬虫沿用原项目的公开网页+订单JSON采集方式，只采集熬鹰。首次从本周或更早的基线时间开始读取；后续采集覆盖上次成功时间并重叠5分钟，跨周和停机后也保留该边界。每轮最多400条，超过时拒绝发布不完整快照。页面受限时暂停5分钟，CopyCat会因源数据异常暂停交易。公开接口本身仍可能延迟或遗漏，不能保证完整跟随。它不绕过登录、地区和反爬要求；目标服务器的页面可达性需要实际验证。
+先运行 `.venv/bin/python collect.py --once` 验证页面和金额可读取；成功后，一个终端运行 `.venv/bin/python collect.py`，另一个终端运行 `sh start.sh`。自带爬虫沿用原项目的公开网页+订单JSON采集方式，只采集熬鹰。首次从本周或更早的基线时间开始读取；后续采集覆盖上次成功时间并重叠15分钟，跨周和停机后也保留该边界。每轮最多2,000条，超过时拒绝发布不完整快照。连续60秒没有成功采集时，采集进程主动退出，并由 systemd 重启容器；CopyCat 在数据过期期间仍保持暂停。公开接口本身仍可能延迟或遗漏，不能保证完整跟随。它不绕过登录、地区和反爬要求；目标服务器的页面可达性需要实际验证。
 
 ### 源仓位基线（启动必需）
 
