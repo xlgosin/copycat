@@ -175,12 +175,11 @@ class Engine:
             # /fapi/v2/account at most once per minute; position mode is checked only on Start.
             balances = self.exchange.account_balances()
             margin = dec(balances.get("margin_balance") or 0)
-            mismatch = abs(margin - self.c["capital"]) > dec(5)
             label = "U本位" if self.c["mode"] != "paper" else "U本位·仅查询"
             self.account = {"available": str(dec(balances.get("available") or 0)),
                             "margin_balance": str(margin),
                             "wallet_balance": str(dec(balances.get("wallet_balance") or 0)),
-                            "updated": stamp(), "error": None, "mismatch": mismatch, "label": label,
+                            "updated": stamp(), "error": None, "mismatch": False, "label": label,
                             "hedge_mode": hedge}
             self._account_refreshed_at = now
         except Exception as exc:
@@ -305,7 +304,7 @@ class Engine:
             # Pending quantity is requested, not confirmed filled.
             event.pop("quantity", None)
             event.pop("price", None)
-            self.enqueue_notification("待确认订单", event, f"{error}；请求数量 {pending['quantity']}，系统将自动查询交易所结果")
+            self.enqueue_notification("订单自动确认中", event, f"{error}；请求数量 {pending['quantity']}，系统将自动查询交易所结果，无需手动处理")
             self.s["last_notified_pending"] = pending["client_id"]
         try:
             with self.connection() as con:
@@ -611,8 +610,8 @@ class Engine:
                 raise ValueError(self.worker_error)
             if self.s.get("review_required"):
                 raise ValueError(self.s["review_required"])
-            if self.s["pending"]:
-                raise ValueError("有结果待确认的订单，请先点击核对订单")
+            if self.s["pending"] and not self.auto_resolve_pending():
+                raise ValueError("订单结果正在自动确认，确认完成后将自动恢复跟单")
             if self.s["running"] and not self.stop_requested.is_set():
                 return
             self.s.update(running=False, error=None)
@@ -630,9 +629,7 @@ class Engine:
                     raise ValueError("实盘未启用，请在 .env 设置 LIVE_TRADING_ENABLED=true 并重启")
                 if self.check_position_mode():
                     raise ValueError("本版要求单向持仓模式；可在页面确认后自动切换")
-                account = self.exchange.validate_account()
-                if dec(account["totalMarginBalance"]) > self.c["capital"] + dec(5):
-                    raise ValueError("请使用约100 USDT的独立合约账户；当前账户余额超出预算范围")
+                self.exchange.validate_account()
                 self.reconcile()
             with self.control_lock:
                 if generation != self.stop_generation:
@@ -667,7 +664,7 @@ class Engine:
             return False
         if not self.s.get("auto_resume"):
             return False
-        if self.s["running"] or self.stop_requested.is_set():
+        if self.s["running"]:
             return False
         if self.s.get("review_required") or self.s.get("pending"):
             return False
@@ -679,11 +676,14 @@ class Engine:
                 return False
             if self.check_position_mode():
                 return False
-            account = self.exchange.validate_account()
-            if dec(account["totalMarginBalance"]) > self.c["capital"] + dec(5):
-                return False
+            self.exchange.validate_account()
             self.reconcile()
-        self.s.update(running=True, error=None, resume_at=stamp())
+        # auto_resume=true is persisted only for an operator-enabled session.
+        # It is therefore also the restart token: a process restart must not leave
+        # copying paused merely because the in-memory stop Event starts as set.
+        with self.control_lock:
+            self.stop_requested.clear()
+            self.s.update(running=True, error=None, resume_at=stamp())
         self.record({}, "resume", "源采集已恢复，自动恢复跟单")
         return True
 
@@ -701,6 +701,14 @@ class Engine:
                 heartbeat = profile.get("captured_at") or status.get("last_success_at")
                 self.source = {"name": profile.get("name", "熬鹰资本"), "equity": profile.get("margin_balance"),
                                "aum": profile.get("aum"), "updated": heartbeat, "count": len(events)}
+                # Recover before draining newly published events. This matters when
+                # a CLOSE happened during a collector outage but reached us only
+                # after the source became healthy again.
+                if not self.s["running"] and self.s.get("auto_resume") and not self.s.get("review_required"):
+                    try:
+                        self.try_auto_resume(profile, status)
+                    except ValueError:
+                        pass
                 # Clear sticky source-health errors after collector recovers.
                 if self.s.get("error") in SOURCE_HEALTH_ERRORS:
                     try:
@@ -751,14 +759,22 @@ class Engine:
                             self.s["running"] = False
                         pre_resume = self.s.get("resume_at") and datetime.fromisoformat(e["occurred_at"]) <= datetime.fromisoformat(self.s["resume_at"])
                         local_qty = dec(self.s["positions"].get(key, {}).get("quantity", 0))
-                        if not self.s["running"] or pre_resume:
+                        # 恢复前发生、恢复后才被采集到的开仓不追；但已有本地仓位的
+                        # 平仓必须继续按比例执行以降低风险。否则采集短暂中断后，延迟
+                        # 到达的 CLOSE 会被跳过并把账户永久锁进 review_required。
+                        delayed_risk_reduce = (bool(pre_resume) and self.s["running"] and
+                                               e["operation"] == "CLOSE" and local_qty > 0)
+                        if not self.s["running"] or (pre_resume and not delayed_risk_reduce):
                             if after > 0 and local_qty == 0 and key not in self.s["blocked_cycles"]:
                                 self.s["blocked_cycles"].append(key)
                             if key in self.s["blocked_cycles"] and after == 0:
                                 self.s["blocked_cycles"].remove(key)
                             raise ValueError(close_skip_note(
                                 "暂停期间/恢复前的信号不追单；已有跟单仓位须自行管理", e, before, local_qty))
-                        if not -10 <= age(e["occurred_at"]) <= self.c["signal_age"]:
+                        # Never chase a stale OPEN. A stale CLOSE for a position we
+                        # actually own is risk reduction and remains actionable.
+                        if (not -10 <= age(e["occurred_at"]) <= self.c["signal_age"] and
+                                not (e["operation"] == "CLOSE" and local_qty > 0)):
                             raise ValueError("信号已过期，停止跟单以免漏平仓/追历史订单")
                         if key in self.s["blocked_cycles"]:
                             # Still reduce risk: copy CLOSE proportionally if we already hold.
@@ -777,9 +793,8 @@ class Engine:
                         self.record(e, "skipped", str(exc), **source_close_fields(e, before))
                         if self.stop_requested.is_set() and after > 0 and dec(self.s["positions"].get(key, {}).get("quantity", 0)) == 0 and key not in self.s["blocked_cycles"]:
                             self.s["blocked_cycles"].append(key)
-                        if dec(self.s["positions"].get(key, {}).get("quantity", 0)) > 0 and e["operation"] == "CLOSE":
-                            self.s["review_required"] = "未能执行源平仓信号，请在币安人工核对持仓并归档账本后重新初始化"
-                            self.s.update(running=False, error=self.s["review_required"])
+                        # 可确定结果的 CLOSE 跳过不再制造永久人工锁。保留账本仓位，
+                        # 后续源减仓继续按剩余比例执行；源完全平仓时本地也会完全平仓。
                         if "过期" in str(exc):
                             self.s.update(running=False, error=str(exc))
                     self.s.pop("processing", None)
@@ -916,10 +931,9 @@ class Engine:
         self.s["pending"] = None
         self.s.pop("processing", None)
         if status != "FILLED" and not normal_ioc:
-            self.s.update(running=False, error="订单未完全成交，请检查记录后再启动")
-            if p["operation"] == "CLOSE" and dec(own["quantity"]) > 0:
-                self.s["review_required"] = "平仓订单未完全成交，仍有剩余仓位，请人工核对后恢复"
-                self.s["error"] = self.s["review_required"]
+            # 已取得交易所终态且按实际成交量入账，账实一致；短暂停止后由
+            # auto_resume 自动继续，不再要求人工清锁。
+            self.s.update(running=False, error="订单未完全成交，已按实际成交量入账并等待自动恢复")
         self.save()
 
     def auto_resolve_pending(self):
