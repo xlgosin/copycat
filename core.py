@@ -804,6 +804,16 @@ class Engine:
     def execute(self, e, key, source_before, equity):
         self.check_stopped()
         opening = e["operation"] == "OPEN"
+        if opening:
+            try:
+                delay = age(e.get("occurred_at"))
+            except (AttributeError, TypeError, ValueError):
+                raise ValueError("开仓信号时间无效，跳过")
+            if delay > self.c["signal_age"]:
+                raise ValueError(
+                    f"开仓信号已过期（延迟 {fmt_dec(delay, 1)} 秒，"
+                    f"上限 {self.c['signal_age']} 秒），跳过"
+                )
         own = self.s["positions"].get(key, {"quantity": "0", "entry": "0"})
         if not opening and dec(own["quantity"]) == 0:
             raise ValueError("无本系统跟单仓位，无需平仓")

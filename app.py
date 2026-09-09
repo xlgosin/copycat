@@ -39,7 +39,7 @@ def settings():
          "testnet": os.getenv("BINANCE_TESTNET_URL", "https://demo-fapi.binance.com"),
          "capital": dec(os.getenv("COPY_CAPITAL", "100")), "multiplier": dec(os.getenv("COPY_MULTIPLIER", "3")),
          "leverage": int(os.getenv("FUTURES_LEVERAGE", "5")), "max_gross": dec(os.getenv("MAX_GROSS_NOTIONAL", "500")),
-         "signal_age": int(os.getenv("MAX_SIGNAL_AGE_SECONDS", "180")),
+         "signal_age": int(os.getenv("MAX_SIGNAL_AGE_SECONDS", "300")),
          "source_age": int(os.getenv("MAX_SOURCE_AGE_SECONDS", "300")),
          "deviation": dec(os.getenv("MAX_PRICE_DEVIATION_PERCENT", "1")),
          "poll": max(5, int(os.getenv("POLL_SECONDS", "5"))),

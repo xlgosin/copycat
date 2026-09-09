@@ -6,6 +6,7 @@ import math
 import os
 import re
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,17 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent
 BASE = "https://www.binance.com/bapi/futures/v1/friendly/future/copy-trade/"
 SHANGHAI = timezone(timedelta(hours=8))
+
+
+def poll_watchdog(timeout):
+    """Kill a wedged collector so the service supervisor can restart it."""
+    def expired():
+        print(f"单轮采集超过{timeout}秒，强制退出并交由 systemd 重启容器", flush=True)
+        os._exit(2)
+    timer = threading.Timer(timeout, expired)
+    timer.daemon = True
+    timer.start()
+    return timer
 
 
 def restart_due(last_success_at, started_at, threshold, now=None):
@@ -58,14 +70,22 @@ def parse_orders(items, portfolio):
     return events
 
 
-def request(page, endpoint, payload=None, retries=8):
+def request(page, endpoint, payload=None, retries=8, timeout_seconds=45):
     last = None
     for attempt in range(retries):
-        result = page.evaluate("""async ({url,payload}) => {
-          const r = await fetch(url,{method:payload?'POST':'GET',credentials:'same-origin',
-            headers:{'Content-Type':'application/json'},...(payload?{body:JSON.stringify(payload)}:{})});
-          return {status:r.status, body:await r.text()};
-        }""", {"url": BASE + endpoint, "payload": payload})
+        result = page.evaluate("""async ({url,payload,timeoutMs}) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeoutMs);
+          try {
+            const r = await fetch(url,{method:payload?'POST':'GET',credentials:'same-origin',
+              signal:controller.signal, headers:{'Content-Type':'application/json'},
+              ...(payload?{body:JSON.stringify(payload)}:{})});
+            return {status:r.status, body:await r.text()};
+          } finally {
+            clearTimeout(timer);
+          }
+        }""", {"url": BASE + endpoint, "payload": payload,
+                 "timeoutMs": max(1000, int(timeout_seconds * 1000))})
         last = result
         if result["status"] != 200:
             raise ValueError(f"网页接口 HTTP {result['status']}，暂停5分钟，不绕过限制")
@@ -199,19 +219,20 @@ if __name__ == "__main__":
         raise SystemExit("交易员ID无效")
     collector_started = time.time()
     restart_after = max(60, int(os.getenv("SOURCE_RESTART_AFTER_SECONDS", "60")))
+    poll_timeout = max(60, int(os.getenv("SOURCE_POLL_HARD_TIMEOUT_SECONDS", "120")))
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         while True:
             # Chromium renderers retain a sizeable working set after navigation.
             # Use a fresh context for every poll so cookies, page resources and the
             # renderer process are released instead of accumulating indefinitely.
-            context = browser.new_context(locale="zh-TW")
-            page = context.new_page()
+            watchdog = poll_watchdog(poll_timeout)
+            context = None
+            next_delay = max(5, int(os.getenv("SOURCE_POLL_SECONDS", "60")))
             try:
+                context = browser.new_context(locale="zh-TW")
+                page = context.new_page()
                 poll(page,path,portfolio)
-                if args.once:
-                    break
-                time.sleep(max(5, int(os.getenv("SOURCE_POLL_SECONDS", "60"))))
             except Exception as exc:
                 updated = datetime.now(timezone.utc).isoformat()
                 wait = max(15, int(os.getenv("SOURCE_FAILURE_WAIT_SECONDS", "30")))
@@ -231,6 +252,11 @@ if __name__ == "__main__":
                     # context.close() finally block. Exit without running Python
                     # cleanup so Docker terminates and systemd can restart it.
                     os._exit(2)
-                time.sleep(wait)
+                next_delay = wait
             finally:
-                context.close()
+                if context is not None:
+                    context.close()
+                watchdog.cancel()
+            if args.once:
+                break
+            time.sleep(next_delay)
