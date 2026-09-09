@@ -225,7 +225,10 @@ if __name__ == "__main__":
                     raise SystemExit(1)
                 if restart_due(status.get("last_success_at"), collector_started, restart_after):
                     print(f"连续{restart_after}秒未成功采集，退出并交由 systemd 重启容器", flush=True)
-                    raise SystemExit(2)
+                    # A dead Playwright transport can hang forever in the
+                    # context.close() finally block. Exit without running Python
+                    # cleanup so Docker terminates and systemd can restart it.
+                    os._exit(2)
                 time.sleep(wait)
             finally:
                 context.close()
