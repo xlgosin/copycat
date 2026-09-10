@@ -120,6 +120,23 @@ def create_app(engine, token):
             engine.report_error(str(exc))
             return jsonify(error=str(exc)), 400
 
+    @app.get("/api/bnb-fees")
+    def bnb_fees():
+        try:
+            return jsonify(engine.bnb_fee_status())
+        except Exception as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.post("/api/bnb-fees")
+    def configure_bnb_fees():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or not isinstance(body.get("convert"), bool):
+            return jsonify(error="需要明确指定是否兑换 BNB"), 400
+        try:
+            return jsonify(engine.configure_bnb_fees(convert=body["convert"]))
+        except Exception as exc:
+            return jsonify(error=str(exc)), 400
+
     @app.post("/api/start")
     def start():
         body = request.get_json(silent=True)

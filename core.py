@@ -288,6 +288,78 @@ class Engine:
         self.account["hedge_mode"] = hedge
         return hedge
 
+    def bnb_fee_status(self):
+        if self.c["mode"] != "live":
+            return {"available": False, "enabled": False, "balance": "0", "value_usdt": "0",
+                    "needs_bnb": False, "pending": False}
+        status = self.exchange.bnb_fee_status()
+        initialized = bool(self.s.get("bnb_fee_initialized"))
+        threshold = dec(3) if initialized else dec(5)
+        status.update(available=True, needs_bnb=dec(status["value_usdt"]) < threshold,
+                      pending=bool(self.s.get("bnb_convert_pending")), initialized=initialized,
+                      replenish_below_usdt="3")
+        return status
+
+    def configure_bnb_fees(self, convert=False):
+        """Enable BNB fee burn and, with explicit UI consent, buy 5 USDT of BNB."""
+        with self.lock:
+            if self.c["mode"] != "live":
+                raise ValueError("BNB 手续费设置仅适用于实盘")
+            if self.s.get("running"):
+                raise ValueError("请先暂停跟单再调整 BNB 手续费设置")
+            converted = False
+            pending = self.s.get("bnb_convert_pending")
+            if pending:
+                # Check the wallet before any other mutation. Binance may reject
+                # a repeated fee-burn toggle even though the prior request worked.
+                current = self.exchange.bnb_fee_status()
+                if dec(current["value_usdt"]) >= dec(5):
+                    self.s.pop("bnb_convert_pending", None)
+                    self.s["bnb_fee_initialized"] = True
+                    self.save()
+                    return {**current, "available": True, "enabled": True, "needs_bnb": False,
+                            "pending": False, "initialized": True, "converted": True,
+                            "replenish_below_usdt": "3"}
+            current = self.exchange.bnb_fee_status()
+            if not current.get("enabled"):
+                self.exchange.enable_bnb_fee_burn()
+            if convert:
+                if pending:
+                    result = self.exchange.convert_status(pending["quote_id"])
+                else:
+                    threshold = dec(3) if self.s.get("bnb_fee_initialized") else dec(5)
+                    if dec(current["value_usdt"]) >= threshold:
+                        self.s["bnb_fee_initialized"] = True
+                        self.save()
+                        return {**current, "available": True, "needs_bnb": False,
+                                "pending": False, "initialized": True, "converted": False,
+                                "replenish_below_usdt": "3"}
+                    quote = self.exchange.bnb_convert_quote(dec(5))
+                    quote_id = quote.get("quoteId")
+                    if not quote_id or dec(quote.get("fromAmount") or 0) != dec(5):
+                        raise ValueError("币安未返回有效的 5 USDT BNB 兑换报价")
+                    self.s["bnb_convert_pending"] = {"quote_id": str(quote_id), "created": stamp()}
+                    self.save()
+                    self.exchange.accept_convert_quote(quote_id)
+                    result = self.exchange.convert_status(quote_id)
+                order_status = result.get("orderStatus")
+                if order_status != "SUCCESS":
+                    if order_status in ("FAIL", "EXPIRED"):
+                        self.s.pop("bnb_convert_pending", None)
+                        self.save()
+                        raise ValueError(f"BNB 兑换未成功（{order_status}），未启动跟单")
+                    raise ValueError("BNB 兑换正在由币安处理，请稍后再次点击开始跟单；系统不会重复兑换")
+                self.s.pop("bnb_convert_pending", None)
+                self.s["bnb_fee_initialized"] = True
+                self.save()
+                converted = True
+            status = self.exchange.bnb_fee_status()
+            self.s["bnb_fee_initialized"] = True
+            self.save()
+            return {**status, "available": True, "needs_bnb": dec(status["value_usdt"]) < dec(3),
+                    "pending": False, "initialized": bool(self.s.get("bnb_fee_initialized")),
+                    "replenish_below_usdt": "3", "converted": converted}
+
     def enable_one_way_mode(self):
         if not (self.c["key"] and self.c["secret"]):
             raise ValueError("请先配置币安 API Key / Secret")

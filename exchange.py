@@ -116,6 +116,34 @@ class Binance:
                 "margin_balance": account.get("totalMarginBalance"),
                 "wallet_balance": account.get("totalWalletBalance")}
 
+    def bnb_fee_status(self):
+        """Return USD-M BNB fee-burn status and the BNB wallet's USDT value."""
+        burn = self.request("GET", "/fapi/v1/feeBurn", signed=True)
+        account = self.request("GET", "/fapi/v2/account", signed=True)
+        asset = next((row for row in account.get("assets", []) if row.get("asset") == "BNB"), {})
+        balance = dec(asset.get("walletBalance") or 0)
+        price = self.last_price("BNBUSDT")
+        enabled = burn.get("feeBurn")
+        if enabled is None:
+            enabled = burn.get("feeBurnEnabled")
+        enabled = enabled is True or str(enabled).lower() == "true"
+        return {"enabled": enabled, "balance": str(balance), "price": str(price),
+                "value_usdt": str(balance * price)}
+
+    def enable_bnb_fee_burn(self):
+        return self.request("POST", "/fapi/v1/feeBurn", {"feeBurn": "true"}, True)
+
+    def bnb_convert_quote(self, usdt_amount):
+        return self.request("POST", "/fapi/v1/convert/getQuote",
+                            {"fromAsset": "USDT", "toAsset": "BNB",
+                             "fromAmount": str(dec(usdt_amount)), "validTime": "10s"}, True)
+
+    def accept_convert_quote(self, quote_id):
+        return self.request("POST", "/fapi/v1/convert/acceptQuote", {"quoteId": str(quote_id)}, True)
+
+    def convert_status(self, quote_id):
+        return self.request("GET", "/fapi/v1/convert/orderStatus", {"quoteId": str(quote_id)}, True)
+
     def hedge_mode(self):
         return bool(self.request("GET", "/fapi/v1/positionSide/dual", signed=True)["dualSidePosition"])
 

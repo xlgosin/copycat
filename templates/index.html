@@ -25,6 +25,19 @@
     </div>
   </form>
 </dialog>
+<dialog id="bnbDialog" class="live-dialog">
+  <form method="dialog" id="bnbForm">
+    <p class="live-eyebrow">BNB FEE DISCOUNT</p>
+    <h2>确认启用 BNB 手续费抵扣</h2>
+    <p id="bnbSummary"></p>
+    <p class="hint">确认后会开启 U 本位合约的 BNB 手续费抵扣；首次准备 5 USDT 的 BNB，此后仅在其市值不足 3 USDT 时再兑换 5 USDT。</p>
+    <p id="bnbError" class="live-error" hidden></p>
+    <div class="live-actions">
+      <button type="submit" value="cancel" class="secondary">暂不启动</button>
+      <button type="submit" value="confirm" id="bnbOk">确认并继续</button>
+    </div>
+  </form>
+</dialog>
 <dialog id="hedgeDialog" class="live-dialog">
   <form method="dialog" id="hedgeForm">
     <p class="live-eyebrow">POSITION MODE</p>

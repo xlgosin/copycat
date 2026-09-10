@@ -105,6 +105,18 @@ function openHedgeDialog(){
   $('hedgeError').hidden=true;
   $('hedgeDialog').showModal();
 }
+function openBnbDialog(fees){
+  $('bnbError').hidden=true;
+  const value=number(fees.value_usdt||0);
+  const actions=[];
+  if(!fees.enabled)actions.push('开启 BNB 手续费抵扣');
+  if(fees.pending)actions.push('核对上次 BNB 兑换结果');
+  else if(fees.needs_bnb)actions.push(fees.initialized?'BNB 已低于 3 USDT，用 5 USDT 补充':'首次用 5 USDT 兑换 BNB');
+  if(!actions.length)actions.push('启用低于 3 USDT 时补充 5 USDT BNB 的策略');
+  $('bnbSummary').textContent=`当前合约钱包 BNB 约值 ${value} USDT。将${actions.join('，')}。`;
+  $('bnbDialog').dataset.convert=(fees.needs_bnb||fees.pending)?'true':'false';
+  $('bnbDialog').showModal();
+}
 function openCloseDialog(key){
   closeKey=key;
   const position=key&&state?.positions?.[key];
@@ -120,9 +132,26 @@ $('start').addEventListener('click', async ()=>{
     const mode=await api('position-mode');
     if(state){state.account={...(state.account||{}), ...(mode.account||{}), hedge_mode:mode.hedge_mode}}
     if(mode.hedge_mode){openHedgeDialog();return}
+    const fees=await api('bnb-fees');
+    if(!fees.enabled||!fees.initialized||fees.needs_bnb||fees.pending){openBnbDialog(fees);return}
     openLiveDialog();
   }catch(e){$('message').textContent=e.message}
   finally{$('start').disabled=Boolean(state?.running);$('start').textContent=state?.running?'跟单中':'开始跟单'}
+});
+$('bnbForm').addEventListener('submit',async e=>{
+  const submitter=e.submitter;
+  if(submitter&&submitter.value==='cancel')return;
+  e.preventDefault();
+  $('bnbOk').disabled=true;
+  try{
+    const convert=$('bnbDialog').dataset.convert==='true';
+    const result=await api('bnb-fees',{convert});
+    $('bnbDialog').close();
+    $('message').textContent=result.converted?'已兑换 5 USDT 的 BNB，并开启手续费抵扣。':'已开启 BNB 手续费抵扣。';
+    await refresh();
+    openLiveDialog();
+  }catch(err){$('bnbError').hidden=false;$('bnbError').textContent=err.message}
+  finally{$('bnbOk').disabled=false}
 });
 $('liveForm').addEventListener('submit',e=>{
   const submitter=e.submitter;
@@ -141,7 +170,11 @@ $('hedgeForm').addEventListener('submit',async e=>{
     $('hedgeDialog').close();
     $('message').textContent='已切换为单向持仓，请再次点击开始跟单';
     await refresh();
-    if(state?.mode==='live' && !state?.account?.hedge_mode) openLiveDialog();
+    if(state?.mode==='live' && !state?.account?.hedge_mode){
+      const fees=await api('bnb-fees');
+      if(!fees.enabled||!fees.initialized||fees.needs_bnb||fees.pending)openBnbDialog(fees);
+      else openLiveDialog();
+    }
   }catch(err){
     $('hedgeError').hidden=false;
     $('hedgeError').textContent=err.message;
