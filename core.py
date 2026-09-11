@@ -903,6 +903,7 @@ class Engine:
             quantity = dec(own["quantity"]) * dec(e["quantity"]) / source_before
         quantity = self.exchange.quantity(rule, quantity, price, opening)
         if opening:
+            order_leverage = max(self.c["leverage"], 20) if Binance.is_tradfi(rule) else self.c["leverage"]
             risk_price = price
             gross = dec(0)
             for k,v in self.s["positions"].items():
@@ -914,14 +915,15 @@ class Engine:
             if self.c["mode"] != "paper":
                 account = self.exchange.validate_account()
                 available = min(dec(account["availableBalance"]), self.c["capital"])
-                if quantity * risk_price / self.c["leverage"] + quantity * risk_price * dec("0.002") > available:
+                if quantity * risk_price / order_leverage + quantity * risk_price * dec("0.002") > available:
                     raise ValueError("可用保证金不足（已预留费用）")
                 self.check_stopped()
-                self.exchange.prepare(e["symbol"], self.c["leverage"])
+                self.exchange.prepare(e["symbol"], order_leverage)
         pending = {"event": e, "key": key, "symbol": e["symbol"], "operation": e["operation"],
             "quantity": str(quantity), "price": str(price),
             "order_side": order_side, "order_type": "MARKET",
             "limit_price": None, "time_in_force": None,
+            "leverage": order_leverage if opening else None,
             "source_before": str(source_before) if not opening else None,
             "client_id": "cc_" + hashlib.sha256((self.c["mode"] + e["event_id"]).encode()).hexdigest()[:28]}
         self.check_stopped()
@@ -991,6 +993,7 @@ class Engine:
             extras["realized_pnl"] = str(pnl)
         self.record(p["event"], "filled" if quantity else "rejected", note,
                     quantity=str(quantity), price=str(price), client_id=p["client_id"], exchange_status=status,
+                    local_leverage=p.get("leverage"),
                     order_type=p.get("order_type", "MARKET"), limit_price=p.get("limit_price"),
                     **extras)
         self.s["pending"] = None

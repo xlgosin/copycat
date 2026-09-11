@@ -65,6 +65,7 @@ def message(mode, kind, event, note, mode_capital, portfolio=None):
                        ("source_time","跟单人成交时间"),("source_price","跟单人成交价格"),
                        ("source_quantity","源成交数量"),("source_close_percent","源平仓占比%"),
                        ("local_close_percent","本地平仓占比%"),
+                       ("local_leverage","本地杠杆"),
                        ("exchange_status","交易所状态"),("realized_pnl","本次平仓毛盈亏USDT")):
         if event.get(key) is not None:
             lines.append(f"{label}：{event[key]}")

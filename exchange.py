@@ -7,6 +7,8 @@ from urllib.parse import urlencode
 
 import requests
 
+SUPPORTED_CONTRACT_TYPES = {"PERPETUAL", "TRADIFI_PERPETUAL"}
+
 
 def dec(value):
     result = Decimal(str(value))
@@ -66,12 +68,17 @@ class Binance:
             self.rules = {s["symbol"]: s for s in info["symbols"]}
             self.rules_time = time.time()
         rule = self.rules.get(symbol)
-        if not rule or rule["status"] != "TRADING" or rule["quoteAsset"] != "USDT" or rule.get("contractType") != "PERPETUAL":
-            raise ValueError("暂不支持此合约：仅支持交易中的 USDT 永续合约")
+        if (not rule or rule["status"] != "TRADING" or rule["quoteAsset"] != "USDT"
+                or rule.get("contractType") not in SUPPORTED_CONTRACT_TYPES):
+            raise ValueError("暂不支持此合约：仅支持交易中的 USDT 加密资产或 TradFi 永续合约")
         price = dec(self.request("GET", "/fapi/v1/premiumIndex", {"symbol": symbol})["markPrice"])
         if price <= 0:
             raise ValueError("币安价格无效")
         return rule, price
+
+    @staticmethod
+    def is_tradfi(rule):
+        return rule.get("contractType") == "TRADIFI_PERPETUAL"
 
     def last_price(self, symbol):
         price = dec(self.request("GET", "/fapi/v1/ticker/price", {"symbol": symbol})["price"])
