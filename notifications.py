@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import os
 import time
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -42,7 +42,8 @@ class DingTalk:
 
     def send(self, item):
         try:
-            r = requests.post(self.signed_url(), json={"msgtype": "text", "text": {"content": item["text"]},
+            r = requests.post(self.signed_url(), json={"msgtype": "markdown", "markdown": {
+                              "title": item.get("title") or "CopyCat 交易通知", "text": item["text"]},
                               "at": {"isAtAll": False}}, timeout=(5, 10), allow_redirects=False)
             if r.status_code != 200:
                 raise ValueError(f"钉钉响应HTTP {r.status_code}")
@@ -53,7 +54,7 @@ class DingTalk:
             raise ValueError("钉钉网络请求失败，通知等待重试") from None
 
 
-def message(mode, kind, event, note, mode_capital):
+def message(mode, kind, event, note, mode_capital, portfolio=None):
     labels = {"paper":"模拟", "testnet":"测试网", "live":"实盘"}
     lines = [f"CopyCat · 熬鹰跟单 · {labels.get(mode, mode)} · {kind}",
              f"时间：{event.get('time') or event.get('occurred_at') or '—'}",
@@ -68,4 +69,7 @@ def message(mode, kind, event, note, mode_capital):
         if event.get(key) is not None:
             lines.append(f"{label}：{event[key]}")
     lines.append(f"说明：{note}")
+    if kind == "开仓成交" and portfolio:
+        portfolio_id = quote(str(portfolio), safe="")
+        lines.extend(("", f"[查看币安交易员页面](https://www.binance.com/en/copy-trading/lead-details/{portfolio_id})"))
     return "\n".join(lines)

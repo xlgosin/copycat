@@ -505,11 +505,12 @@ class Engine:
     def enqueue_notification(self, kind, event, note):
         if not self.notifier.enabled:
             return
-        text = message(self.c["mode"], kind, event, note, self.c["capital"])
+        text = message(self.c["mode"], kind, event, note, self.c["capital"], self.c["portfolio"])
         identifier = hashlib.sha256(text.encode()).hexdigest()[:20]
         queue = self.s.setdefault("notifications", [])
         if not any(n["id"] == identifier for n in queue):
-            queue.append({"id": identifier, "text": text + f"\n通知编号：{identifier}", "attempts": 0, "next_try": 0})
+            queue.append({"id": identifier, "title": f"CopyCat · {kind}",
+                          "text": text + f"\n通知编号：{identifier}", "attempts": 0, "next_try": 0})
 
     def report_error(self, error):
         with self.lock:
