@@ -510,7 +510,7 @@ class Engine:
         queue = self.s.setdefault("notifications", [])
         if not any(n["id"] == identifier for n in queue):
             queue.append({"id": identifier, "title": f"CopyCat · {kind}",
-                          "text": text + f"\n通知编号：{identifier}", "attempts": 0, "next_try": 0})
+                          "text": text + f"\n\n通知编号：{identifier}", "attempts": 0, "next_try": 0})
 
     def report_error(self, error):
         with self.lock:
@@ -903,7 +903,8 @@ class Engine:
             quantity = dec(own["quantity"]) * dec(e["quantity"]) / source_before
         quantity = self.exchange.quantity(rule, quantity, price, opening)
         if opening:
-            order_leverage = max(self.c["leverage"], 20) if Binance.is_tradfi(rule) else self.c["leverage"]
+            tradfi = Binance.is_tradfi(rule)
+            order_leverage = max(self.c["leverage"], 20) if tradfi else self.c["leverage"]
             risk_price = price
             gross = dec(0)
             for k,v in self.s["positions"].items():
@@ -918,7 +919,7 @@ class Engine:
                 if quantity * risk_price / order_leverage + quantity * risk_price * dec("0.002") > available:
                     raise ValueError("可用保证金不足（已预留费用）")
                 self.check_stopped()
-                self.exchange.prepare(e["symbol"], order_leverage)
+                self.exchange.prepare(e["symbol"], order_leverage, tradfi=tradfi)
         pending = {"event": e, "key": key, "symbol": e["symbol"], "operation": e["operation"],
             "quantity": str(quantity), "price": str(price),
             "order_side": order_side, "order_type": "MARKET",

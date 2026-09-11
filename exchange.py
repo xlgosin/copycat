@@ -59,7 +59,9 @@ class Binance:
             raise RuntimeError(f"币安响应无效 HTTP {response.status_code}") from None
         if not response.ok or (isinstance(body, dict) and int(body.get("code", 0)) < 0):
             code = body.get("code") if isinstance(body, dict) else "未知"
-            raise RuntimeError(f"币安拒绝/未确认请求 HTTP {response.status_code}，代码 {code}")
+            detail = str(body.get("msg") or "")[:160] if isinstance(body, dict) else ""
+            suffix = f"：{detail}" if detail else ""
+            raise RuntimeError(f"币安拒绝/未确认请求 HTTP {response.status_code}，代码 {code}{suffix}")
         return body
 
     def market(self, symbol):
@@ -165,12 +167,15 @@ class Binance:
             raise ValueError("账户未获得合约交易权限")
         return account
 
-    def prepare(self, symbol, leverage):
-        # All positions owned by this app must use isolated margin.
+    def prepare(self, symbol, leverage, tradfi=False):
+        # Binance TradFi perpetuals require cross margin; crypto perpetuals
+        # remain isolated so one position cannot consume another's margin.
         rows = self.positions()
         row = next((p for p in rows if p["symbol"] == symbol and p["positionSide"] == "BOTH"), None)
-        if row is None or row.get("marginType") != "isolated":
-            self.request("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": "ISOLATED"}, True)
+        desired_value = "cross" if tradfi else "isolated"
+        desired_param = "CROSSED" if tradfi else "ISOLATED"
+        if row is None or row.get("marginType", "").lower() != desired_value:
+            self.request("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": desired_param}, True)
         self.request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage}, True)
 
     def order(self, pending):

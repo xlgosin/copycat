@@ -56,10 +56,12 @@ class DingTalk:
 
 def message(mode, kind, event, note, mode_capital, portfolio=None):
     labels = {"paper":"模拟", "testnet":"测试网", "live":"实盘"}
-    lines = [f"CopyCat · 熬鹰跟单 · {labels.get(mode, mode)} · {kind}",
-             f"时间：{event.get('time') or event.get('occurred_at') or '—'}",
-             f"合约：{event.get('symbol') or '系统'} / {event.get('side') or '—'}",
-             f"操作：{event.get('operation') or '—'}；本金：{mode_capital} USDT"]
+    lines = [f"### CopyCat · 熬鹰跟单 · {labels.get(mode, mode)} · {kind}",
+             f"- **时间：** {event.get('time') or event.get('occurred_at') or '—'}"]
+    if event.get("symbol"):
+        lines.append(f"- **合约：** {event['symbol']} / {event.get('side') or '—'}")
+    if event.get("operation"):
+        lines.extend((f"- **操作：** {event['operation']}", f"- **本金：** {mode_capital} USDT"))
     for key, label in (("quantity","本次成交数量"),("price","成交价格"),("client_id","订单编号"),
                        ("order_type","订单类型"),("limit_price","委托限价"),
                        ("source_time","跟单人成交时间"),("source_price","跟单人成交价格"),
@@ -68,9 +70,10 @@ def message(mode, kind, event, note, mode_capital, portfolio=None):
                        ("local_leverage","本地杠杆"),
                        ("exchange_status","交易所状态"),("realized_pnl","本次平仓毛盈亏USDT")):
         if event.get(key) is not None:
-            lines.append(f"{label}：{event[key]}")
-    lines.append(f"说明：{note}")
-    if kind == "开仓成交" and portfolio:
+            lines.append(f"- **{label}：** {event[key]}")
+    lines.append(f"- **说明：** {note}")
+    body = lines[0] + "\n\n" + "\n".join(lines[1:])
+    if event.get("operation") == "OPEN" and portfolio:
         portfolio_id = quote(str(portfolio), safe="")
-        lines.extend(("", f"[查看币安交易员页面](https://www.binance.com/en/copy-trading/lead-details/{portfolio_id})"))
-    return "\n".join(lines)
+        body += f"\n\n[查看币安交易员页面](https://www.binance.com/en/copy-trading/lead-details/{portfolio_id})"
+    return body
