@@ -4,9 +4,41 @@ import hashlib
 import hmac
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import requests
+
+
+UTC8 = timezone(timedelta(hours=8))
+
+
+def format_time(value):
+    """Render source and local timestamps consistently in China Standard Time."""
+    if value in (None, ""):
+        return "—"
+    try:
+        if isinstance(value, (int, float)) or str(value).strip().isdigit():
+            stamp = float(value)
+            if stamp > 10_000_000_000:
+                stamp /= 1000
+            parsed = datetime.fromtimestamp(stamp, timezone.utc)
+        else:
+            parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(UTC8).strftime("%Y-%m-%d %H:%M:%S") + " (UTC+8)"
+    except (OSError, OverflowError, TypeError, ValueError):
+        return str(value)
+
+
+def trade_style(event):
+    side = event.get("side")
+    operation = event.get("operation")
+    direction = {"LONG": "多单", "SHORT": "空单"}.get(side, side or "—")
+    action = {"OPEN": "开仓", "CLOSE": "平仓"}.get(operation, operation or "—")
+    marker = {"LONG": "🟢", "SHORT": "🔴"}.get(side, "🔵")
+    return marker, direction, action
 
 
 def notification_config():
@@ -56,12 +88,18 @@ class DingTalk:
 
 def message(mode, kind, event, note, mode_capital, portfolio=None):
     labels = {"paper":"模拟", "testnet":"测试网", "live":"实盘"}
-    lines = [f"### CopyCat · 熬鹰跟单 · {labels.get(mode, mode)} · {kind}",
-             f"- **时间：** {event.get('time') or event.get('occurred_at') or '—'}"]
+    marker, direction, action = trade_style(event)
+    symbol = event.get("symbol")
+    heading = f"{marker} **{symbol}** · {direction} · {kind}" if symbol else f"{marker} CopyCat · {kind}"
+    lines = [f"### {heading}",
+             f"> **CopyCat · 熬鹰跟单**　|　{labels.get(mode, mode)}",
+             "",
+             f"- **通知时间**　{format_time(event.get('time') or event.get('occurred_at'))}"]
     if event.get("symbol"):
-        lines.append(f"- **合约：** {event['symbol']} / {event.get('side') or '—'}")
+        lines.append(f"- **交易方向**　{marker} **{direction}**")
     if event.get("operation"):
-        lines.extend((f"- **操作：** {event['operation']}", f"- **本金：** {mode_capital} USDT"))
+        capital = event.get("calculation_capital") or mode_capital
+        lines.extend((f"- **交易操作**　{action}", f"- **计算本金**　`{capital} USDT`"))
     for key, label in (("quantity","本次成交数量"),("price","成交价格"),("client_id","订单编号"),
                        ("order_type","订单类型"),("limit_price","委托限价"),
                        ("source_time","跟单人成交时间"),("source_price","跟单人成交价格"),
@@ -70,9 +108,10 @@ def message(mode, kind, event, note, mode_capital, portfolio=None):
                        ("local_leverage","本地杠杆"),
                        ("exchange_status","交易所状态"),("realized_pnl","本次平仓毛盈亏USDT")):
         if event.get(key) is not None:
-            lines.append(f"- **{label}：** {event[key]}")
-    lines.append(f"- **说明：** {note}")
-    body = lines[0] + "\n\n" + "\n".join(lines[1:])
+            value = format_time(event[key]) if key == "source_time" else event[key]
+            lines.append(f"- **{label}**　`{value}`")
+    lines.extend(("", f"> **说明**　{note}"))
+    body = "\n".join(lines)
     if event.get("operation") == "OPEN" and portfolio:
         portfolio_id = quote(str(portfolio), safe="")
         body += f"\n\n[查看币安交易员页面](https://www.binance.com/en/copy-trading/lead-details/{portfolio_id})"

@@ -221,18 +221,6 @@ if ! PY="\$(pick_python)"; then
 fi
 echo "使用 Python: \$PY (\$(\$PY --version 2>&1))"
 
-# CentOS 等：采集器依赖 greenlet，无 wheel 时需 g++
-if ! command -v g++ >/dev/null 2>&1; then
-  if command -v yum >/dev/null 2>&1; then
-    yum install -y gcc gcc-c++ make
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y gcc gcc-c++ make
-  elif command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get install -y build-essential
-  fi
-fi
-
 # 旧 venv（如 3.6）无法装 Flask 3，版本不够就重建
 if [[ -x .venv/bin/python ]] && ! need_py .venv/bin/python; then
   echo "现有 .venv Python 过旧，重建..."
@@ -246,30 +234,14 @@ fi
 
 COLLECTOR_MODE=none
 if [[ '$WITH_COLLECTOR' -eq 1 ]]; then
-  GLIBC_VER="\$(ldd --version 2>/dev/null | awk 'NR==1{print \$NF; exit}')"
-  GLIBC_OK=0
-  if awk -v v="\$GLIBC_VER" 'BEGIN{split(v,a,"."); exit !((a[1]>2)||(a[1]==2&&a[2]>=28))}'; then
-    GLIBC_OK=1
-  fi
-  if [[ "\$GLIBC_OK" -eq 1 ]]; then
-    echo "采集器: 本机 Playwright (glibc=\$GLIBC_VER)"
-    .venv/bin/python -m pip install -q --only-binary=:all: -i https://pypi.org/simple 'greenlet>=3.1.1,<4' || true
-    .venv/bin/python -m pip install -q -r requirements-collector.txt
-    .venv/bin/playwright install-deps chromium >/dev/null 2>&1 || true
-    .venv/bin/playwright install chromium
-    COLLECTOR_MODE=native
-  elif command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker; then
-    echo "采集器: Docker（glibc=\${GLIBC_VER:-unknown} 过旧，原生 Playwright 不可用）"
-    docker build -t copycat-collector:latest -f scripts/Dockerfile.collector .
-    COLLECTOR_MODE=docker
-  else
-    echo "警告: glibc=\${GLIBC_VER:-unknown} 且无 Docker，无法部署采集器。" >&2
-  fi
+  echo "采集器: 本机 Python HTTP"
+  .venv/bin/python -m pip install -q -r requirements-collector.txt
+  COLLECTOR_MODE=native
 fi
 
 install -m 644 scripts/systemd/copycat.service /etc/systemd/system/copycat.service
 
-# Log caps: file logs + journald + (docker log-opt in unit)
+# Log caps: file logs + journald.
 if command -v logrotate >/dev/null 2>&1; then
   sed "s|/opt/copycat|${REMOTE_DIR}|g" scripts/logrotate.copycat > /etc/logrotate.d/copycat
   chmod 644 /etc/logrotate.d/copycat
@@ -286,17 +258,12 @@ if [[ "\$COLLECTOR_MODE" == "native" ]]; then
   install -m 644 scripts/systemd/copycat-collector.service /etc/systemd/system/copycat-collector.service
   systemctl enable copycat-collector.service
   systemctl restart copycat-collector.service
-elif [[ "\$COLLECTOR_MODE" == "docker" ]]; then
-  install -m 644 scripts/systemd/copycat-collector.docker.service /etc/systemd/system/copycat-collector.service
-  systemctl enable copycat-collector.service
-  systemctl restart copycat-collector.service
 else
   systemctl disable --now copycat-collector.service >/dev/null 2>&1 || true
 fi
 
 # The standalone collector above writes data/source.db, so the legacy Compose
-# collector is redundant. Its long-lived Playwright renderer can retain several
-# GB of memory and its unless-stopped policy otherwise keeps it alive forever.
+# collector is redundant.
 if [[ "\$COLLECTOR_MODE" != "none" ]] && docker inspect binance-copy-monitor >/dev/null 2>&1; then
   echo "停止已被独立采集器替代的旧容器 binance-copy-monitor..."
   docker stop binance-copy-monitor >/dev/null

@@ -1,4 +1,5 @@
-let token = localStorage.getItem('copycat_admin_token') || '', state = null, busy = false, actionBusy = false, historyBusy = false, historyPage = null, closeKey = null, recordKind = 'trade';
+let token = localStorage.getItem('copycat_admin_token') || '', state = null, busy = false, actionBusy = false, historyBusy = false, historyPage = null, historyIndex = 0, historyCursors = [null], closeKey = null, recordKind = 'trade';
+const RECORD_PAGE_SIZE=5;
 const $ = id => document.getElementById(id);
 const number = (n, digits=2) => n == null ? '—' : Number(n).toLocaleString('zh-CN',{maximumFractionDigits:digits});
 const escape = x => String(x ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -25,14 +26,15 @@ function render(s){
   $('start').disabled=actionBusy||Boolean(s.running);
   $('start').textContent=s.running?'跟单中':'开始跟单';
   $('updated').textContent='源数据 '+date(s.source.updated);
-  $('equity').textContent=number(s.source.equity);   $('capital').textContent=number(s.capital);
+  const calculationCapital=s.calculation_capital??s.capital;
+  $('equity').textContent=number(s.source.equity);   $('capital').textContent=number(calculationCapital);
   const heroLine=document.querySelector('.hero p');
-  if(heroLine)heroLine.textContent=`${number(s.capital,0)} USDT 本金 · ${s.multiplier} 倍比例跟单 · 独立逐仓执行`;
+  if(heroLine)heroLine.textContent=`${number(calculationCapital,2)} USDT 当前计算本金 · ${s.multiplier} 倍比例跟单 · 独立逐仓执行`;
   const account=s.account||{};
   if(account.error){$('wallet').textContent='—';$('walletHint').textContent=account.error}
   else{$('wallet').textContent=number(account.margin_balance);$('walletHint').textContent=(account.label||'U本位')+'权益 '+number(account.margin_balance)+' · 可用 '+number(account.available)}
   $('multiple').textContent=s.multiplier+'×'; $('cap').textContent=number(s.max_gross);
-  $('ratio').textContent=Number(s.source.equity)>0?'数量比例 '+number(Number(s.capital)*Number(s.multiplier)/Number(s.source.equity)*100,5)+'%':'等待带单余额';
+  $('ratio').textContent=Number(s.source.equity)>0?'数量比例 '+number(Number(calculationCapital)*Number(s.multiplier)/Number(s.source.equity)*100,5)+'%':'等待带单余额';
   $('credentials').textContent=(s.credentials_configured?'API凭据已配置':'未配置API凭据，模拟模式无需密钥')+' · 本服务更新 '+date(s.last_poll);
   const ding=s.dingtalk||{};
   $('credentials').textContent+=' · 钉钉'+(ding.enabled?'已启用':'未配置/未启用')+(ding.pending?'，待发 '+ding.pending+' 条':'')+(ding.error?'，'+ding.error:'');
@@ -64,10 +66,10 @@ function render(s){
   }).join(''):'<div class="empty">暂无跟单仓位，启动后等待新的开仓信号。</div>';
   const labels={filled:'成交',skipped:'跳过',blocked:'已阻止',baseline:'初始化',rejected:'未成交',resume:'自动恢复'};
   const categoryOf=r=>r.category==='system'||r.category==='trade'?r.category:(r.status==='resume'||r.status==='baseline'?'system':'trade');
-  const records=historyPage?historyPage.records:s.records;
+  const records=historyPage?historyPage.records:(s.records||[]).filter(r=>recordKind==='all'||categoryOf(r)===recordKind).slice(0,RECORD_PAGE_SIZE);
   const hiddenSystem=recordKind==='trade'?(records||[]).filter(r=>categoryOf(r)==='system').length:0;
   const shown=(records||[]).filter(r=>recordKind==='all'||categoryOf(r)===recordKind);
-  $('recordHint').textContent=hiddenSystem?`已折叠 ${hiddenSystem} 条系统日志，点筛选查看`:(recordKind==='system'?'只显示系统日志':'系统日志默认折叠');
+  $('recordHint').textContent=`第 ${historyIndex+1} 页 · 每页 ${RECORD_PAGE_SIZE} 条`+(hiddenSystem?` · 已折叠 ${hiddenSystem} 条系统日志`:'');
   document.querySelectorAll('.record-filter').forEach(x=>x.classList.toggle('active',x.dataset.kind===recordKind));
   $('orderList').innerHTML=shown.length?shown.map(r=>{
     const system=categoryOf(r)==='system';
@@ -82,11 +84,11 @@ function render(s){
     return `<article class="card${system?' system-log':''}"><div class="cardhead"><strong>${escape(r.symbol||'系统')}</strong><span>${r.operation==='OPEN'?'开仓':r.operation==='CLOSE'?'平仓':''} ${r.side==='LONG'?'多头':r.side==='SHORT'?'空头':''}</span>${system?'<span class="tag">系统</span>':''}<span class="tag">${escape(labels[r.status]||r.status)}</span></div><p>${escape(r.note)}</p>${compare}</article>`;
   }).join(''):'<div class="empty">'+(recordKind==='system'?'暂无系统日志':'暂无记录')+'</div>';
   $('older').disabled=historyBusy || Boolean(historyPage&&!historyPage.next_before);
-  $('latest').hidden=!historyPage;
+  $('latest').disabled=historyBusy || historyIndex===0;
 }
 async function refresh(){if(!token||busy)return;busy=true;try{render(await api('status'));localStorage.setItem('copycat_admin_token',token);$('connection').textContent='已连接'}catch(e){$('connection').textContent='连接异常：'+e.message;if(state)$('running').textContent='连接中断 · 运行状态未知';else $('message').textContent=e.message}finally{busy=false}}
 $('loginForm').addEventListener('submit',e=>{e.preventDefault();token=$('token').value.trim();$('token').value='';refresh()});
-for(const button of document.querySelectorAll('.tab'))button.addEventListener('click',()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===button));document.querySelectorAll('.panel').forEach(x=>x.hidden=x.id!==button.dataset.tab)});
+for(const button of document.querySelectorAll('.tab'))button.addEventListener('click',()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===button));document.querySelectorAll('.panel').forEach(x=>x.hidden=x.id!==button.dataset.tab);if(button.dataset.tab==='orders'&&!historyPage)loadHistory(0)});
 async function action(path,body={}){
   // Pause remains available even while start/reconcile is waiting for a reply.
   if(path!=='stop'&&actionBusy)return;
@@ -98,7 +100,7 @@ async function action(path,body={}){
   finally{if(path==='stop')$('stop').disabled=false;else{actionBusy=false;$('start').disabled=Boolean(state?.running);$('start').textContent=state?.running?'跟单中':'开始跟单'}}
 }
 function openLiveDialog(){
-  $('liveSummary').textContent=`将使用真实资金下单。当前本金 ${number(state.capital)} USDT · 倍率 ${state.multiplier}× · 敞口上限 ${number(state.max_gross)} USDT。`;
+  $('liveSummary').textContent=`将使用真实资金下单。当前计算本金 ${number(state.calculation_capital??state.capital)} USDT（预算上限 ${number(state.capital)}）· 倍率 ${state.multiplier}× · 敞口上限 ${number(state.max_gross)} USDT。`;
   $('liveDialog').showModal();
 }
 function openHedgeDialog(){
@@ -193,6 +195,7 @@ $('closeForm').addEventListener('submit',e=>{
 });
 function recordsPath(before){
   const params=new URLSearchParams();
+  params.set('limit',RECORD_PAGE_SIZE);
   if(recordKind && recordKind!=='all') params.set('kind', recordKind);
   if(before!=null) params.set('before', before);
   const query=params.toString();
@@ -202,18 +205,23 @@ $('recordFilters').addEventListener('click',e=>{
   const button=e.target.closest('[data-kind]');
   if(!button||button.dataset.kind===recordKind) return;
   recordKind=button.dataset.kind;
-  historyPage=null;
-  if(state) render(state);
+  historyPage=null;historyIndex=0;historyCursors=[null];
+  loadHistory(0);
 });
-$('older').addEventListener('click',async()=>{
+async function loadHistory(index){
   if(historyBusy)return;
   historyBusy=true;$('older').disabled=true;
   try{
-    if(!historyPage)historyPage=await api(recordsPath());
-    if(historyPage.next_before)historyPage=await api(recordsPath(historyPage.next_before));
+    historyPage=await api(recordsPath(historyCursors[index]));
+    historyIndex=index;
+    if(historyPage.next_before!=null)historyCursors[index+1]=historyPage.next_before;
   }catch(e){$('message').textContent=e.message}
   finally{historyBusy=false;if(state)render(state)}
+}
+$('older').addEventListener('click',()=>{
+  if(historyBusy||!historyPage?.next_before)return;
+  loadHistory(historyIndex+1);
 });
-$('latest').addEventListener('click',()=>{historyPage=null;if(state)render(state);refresh()});
+$('latest').addEventListener('click',()=>{if(!historyBusy&&historyIndex>0)loadHistory(historyIndex-1)});
 setInterval(refresh,5000);
 if(token) refresh();

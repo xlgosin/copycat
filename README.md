@@ -13,18 +13,18 @@ sh start.sh
 
 首次自动创建虚拟环境并安装依赖。打开 http://127.0.0.1:8010 ，输入启动日志中的控制口令。口令保存在 `data/admin-token`。默认模拟、默认暂停；源仓位基线验证通过后，点击“开始跟单”接收新信号。模拟无需币安密钥，但需要访问币安公开合约行情接口。
 
-本项目的进程、页面、配置和交易账本独立。当前部署使用下面的自带爬虫和 `data/source.db`，无需同时保留旧采集容器。CopyCat 每5秒读取数据库，自带网页采集器默认每10秒发起一轮采集；实际完成时间还取决于网页加载和接口响应，并非交易所实时推送。
+本项目的进程、页面、配置和交易账本独立。当前部署使用下面的自带采集器和 `data/source.db`，无需同时保留旧采集容器。CopyCat 每5秒读取数据库；HTTP 采集器默认每5秒请求成交历史、每60秒刷新账户详情和余额。实际完成时间取决于接口响应，并非交易所实时推送。
 
 ## 不依赖旧项目的独立采集
 
-先按上述方式创建环境，再安装可选浏览器依赖：
+先按上述方式创建环境，再安装采集器依赖：
 
 ```bash
 .venv/bin/python -m pip install -r requirements-collector.txt
 .venv/bin/python -m playwright install chromium
 ```
 
-Linux 缺少系统浏览器依赖时按 Playwright 提示安装；可使用 `python -m playwright install --with-deps chromium`。在 `.env` 配置：
+采集器只使用 Python HTTP 请求，不需要 Chromium、Playwright 或 Docker。在 `.env` 配置：
 
 ```dotenv
 SOURCE_DB=data/source.db
@@ -34,7 +34,7 @@ SOURCE_RESTART_AFTER_SECONDS=60
 SOURCE_POLL_HARD_TIMEOUT_SECONDS=120
 ```
 
-先运行 `.venv/bin/python collect.py --once` 验证页面和金额可读取；成功后，一个终端运行 `.venv/bin/python collect.py`，另一个终端运行 `sh start.sh`。自带爬虫沿用原项目的公开网页+订单JSON采集方式，只采集熬鹰。首次从本周或更早的基线时间开始读取；后续采集覆盖上次成功时间并重叠15分钟，跨周和停机后也保留该边界。每轮最多2,000条，超过时拒绝发布不完整快照。连续60秒没有成功采集时，采集进程主动退出；即使浏览器调用没有返回，单轮超过120秒（可用 `SOURCE_POLL_HARD_TIMEOUT_SECONDS` 调整）也会强制退出，并由 systemd 重启容器。Docker 采集服务限制为最多使用 0.75 个 CPU 核心，避免异常浏览器进程拖满服务器。CopyCat 在数据过期期间仍保持暂停。公开接口本身仍可能延迟或遗漏，不能保证完整跟随。它不绕过登录、地区和反爬要求；目标服务器的页面可达性需要实际验证。
+先运行 `.venv/bin/python collect.py --once` 验证名称、金额和成交可读取；成功后，一个终端运行 `.venv/bin/python collect.py`，另一个终端运行 `sh start.sh`。采集器通过 `lead-portfolio/detail` 读取资料和金额，通过 `lead-portfolio/trade-history` 读取成交；URL 中的数字作为 `portfolioId`，成交接口按 `pageNumber` / `pageSize` 分页。首次从本周或更早的基线时间开始读取；后续采集覆盖上次成功时间并重叠15分钟，跨周和停机后也保留该边界。每轮最多2,000条，超过时拒绝发布不完整快照。连续60秒没有成功采集时，采集进程主动退出；单轮超过120秒（可用 `SOURCE_POLL_HARD_TIMEOUT_SECONDS` 调整）也会强制退出，并由 systemd 重启。CopyCat 在数据过期期间仍保持暂停。公开接口本身仍可能延迟或遗漏，不能保证完整跟随。它不绕过地区和反爬要求；目标服务器的接口可达性需要实际验证。
 
 ### 源仓位基线（启动必需）
 
@@ -63,7 +63,7 @@ SOURCE_POLL_HARD_TIMEOUT_SECONDS=120
 ## 资金与比例
 
 - 本金默认100 USDT；比例放大由 `COPY_MULTIPLIER` 决定（最多3）；普通加密资产永续使用逐仓，杠杆由 `FUTURES_LEVERAGE` 决定（最多5）；TradFi 永续按币安要求使用全仓并至少设置20倍。开仓名义敞口上限由 `MAX_GROSS_NOTIONAL` 决定，不得超过本金×普通合约杠杆（100U×5倍=500U）。这些是开仓前限制，价格上涨后的名义金额可以超过该上限。
-- 开仓数量 = 源成交数量 × 100 / 源带单保证金余额 × 3。这里使用爬虫字段 `margin_balance`，并非包括跟单资金的 `aum`，也不能保证网页数值与交易所逐秒权益一致。
+- 开仓数量 = 源成交数量 × 当前账户权益（不超过配置的本金上限） / 源带单保证金余额 × 跟单倍率。这里使用源接口字段 `margin_balance`，并非包括跟单资金的 `aum`。计算后还会按当前可用余额、预留费用和剩余敞口向下缩量，不因为超出少量保证金而整单跳过。
 - 开仓与平仓均使用 **MARKET**；平仓带 `reduceOnly`。不再使用源成交均价限价 IOC，也不再因价格偏离跳过开仓；市价可能有滑点。
 - 市价未完全成交等异常终态仍会暂停并查询原订单号。
 - 平仓数量 = 本系统该方向剩余数量 × 源平仓数量 / 源平仓前推算数量。向下取整满足数量规则；不足最小数量或源记录不完整时不强行下单。有剩余仓位但漏平信号时会锁定自动运行，须人工处理。
@@ -122,7 +122,7 @@ DINGTALK_SECRET=你的加签Secret
 
 部署时将配置保存在服务器的 CopyCat `.env` 中，修改后重启生效。未填写 Webhook 时不发送通知。
 
-通知覆盖开仓成交、平仓成交、跳过/拒绝订单、异常暂停和待确认订单。每条包含 CopyCat、熬鹰跟单、运行模式、合约方向、原因；已确认成交附数量、价格、客户订单号，平仓附本次毛盈亏。模拟通知明确标记“模拟”，待确认通知不会把请求数量写成成交数量。历史基线不补发通知。
+通知覆盖开仓成交、平仓成交、跳过/拒绝订单、异常暂停和待确认订单。每条包含 CopyCat、熬鹰跟单、运行模式、合约方向、原因；多单使用绿色标识，空单使用红色标识，时间统一显示为 UTC+8。已确认成交附数量、价格、客户订单号，平仓附本次毛盈亏。模拟通知明确标记“模拟”，待确认通知不会把请求数量写成成交数量。历史基线不补发通知。
 
 通知与交易结果一起保存到SQLite，独立线程每4秒至多发送一条，失败退避重试；发送失败不改变交易状态。重复的持续异常、同一笔待确认订单不重复入队。通知服务超时后重试可能重复到达，可用消息中的通知编号识别。队列会跨重启保留，模式切换后需要运行原模式才能继续发送该模式的待发通知。
 
@@ -165,7 +165,7 @@ bash scripts/update.sh app        # 或 带单 —— 同步跟单代码并重�
 ```
 
 会在远程安装并启用 `copycat.service` 与 `copycat-collector.service`（默认目录 `/opt/copycat`）。
-CentOS 7 等旧系统会自动用 Docker 跑采集器。控制台默认 `HOST=0.0.0.0`，浏览器打开：
+采集器直接由服务器 Python 和 systemd 运行，不需要 Docker。控制台默认 `HOST=0.0.0.0`，浏览器打开：
 
 ```text
 http://服务器IP:8010
@@ -173,7 +173,6 @@ http://服务器IP:8010
 
 日志上限（部署时写入）：
 - journald：约 300MB（`scripts/journald-copycat.conf`）
-- Docker 采集器：单文件 20MB × 5（unit 里 `--log-opt`）
 - `logs/*.log`：logrotate 单文件约 20MB（`scripts/logrotate.copycat`）
 
 ### AlphaFox 延迟探针

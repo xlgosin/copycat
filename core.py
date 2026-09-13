@@ -510,7 +510,7 @@ class Engine:
         queue = self.s.setdefault("notifications", [])
         if not any(n["id"] == identifier for n in queue):
             queue.append({"id": identifier, "title": f"CopyCat · {kind}",
-                          "text": text + f"\n\n通知编号：{identifier}", "attempts": 0, "next_try": 0})
+                          "text": text + f"\n\n---\n> 通知编号　`{identifier}`", "attempts": 0, "next_try": 0})
 
     def report_error(self, error):
         with self.lock:
@@ -851,7 +851,10 @@ class Engine:
                         self.check_stopped()
                         self.execute(e, key, before, equity)
                     except ValueError as exc:
-                        self.record(e, "skipped", str(exc), **source_close_fields(e, before))
+                        extras = source_close_fields(e, before)
+                        if e.get("_calculation_capital") is not None:
+                            extras["calculation_capital"] = e["_calculation_capital"]
+                        self.record(e, "skipped", str(exc), **extras)
                     self.s.pop("processing", None)
                     self.save()
                     if self.s["pending"] or self.s.get("error"):
@@ -896,35 +899,47 @@ class Engine:
         rule, price = self.exchange.market(e["symbol"])
         order_side = "BUY" if (e["side"] == "LONG") == opening else "SELL"
         if opening:
-            quantity = dec(e["quantity"]) * self.c["capital"] / equity * self.c["multiplier"]
+            tradfi = Binance.is_tradfi(rule)
+            order_leverage = max(self.c["leverage"], 20) if tradfi else self.c["leverage"]
+            account = self.exchange.validate_account() if self.c["mode"] != "paper" else None
+            current_equity = dec(account["totalMarginBalance"]) if account else self.c["capital"]
+            calculation_capital = min(current_equity, self.c["capital"])
+            if calculation_capital <= 0:
+                raise ValueError("当前账户权益不足，无法计算跟单数量")
+            e["_calculation_capital"] = str(calculation_capital)
+            quantity = dec(e["quantity"]) * calculation_capital / equity * self.c["multiplier"]
         else:
             if source_before <= 0 or dec(e["quantity"]) > source_before:
                 raise ValueError("源仓位数量不完整，停止自动平仓并人工核对")
             quantity = dec(own["quantity"]) * dec(e["quantity"]) / source_before
-        quantity = self.exchange.quantity(rule, quantity, price, opening)
         if opening:
-            tradfi = Binance.is_tradfi(rule)
-            order_leverage = max(self.c["leverage"], 20) if tradfi else self.c["leverage"]
             risk_price = price
             gross = dec(0)
             for k,v in self.s["positions"].items():
                 if dec(v["quantity"]) > 0:
                     _, mark = self.exchange.market(k.split(":")[0])
                     gross += mark * dec(v["quantity"])
-            if gross + quantity * risk_price > self.c["max_gross"]:
-                raise ValueError("开仓将超过总名义敞口上限，跳过")
-            if self.c["mode"] != "paper":
-                account = self.exchange.validate_account()
-                available = min(dec(account["availableBalance"]), self.c["capital"])
-                if quantity * risk_price / order_leverage + quantity * risk_price * dec("0.002") > available:
-                    raise ValueError("可用保证金不足（已预留费用）")
+            remaining_gross = max(dec(0), self.c["max_gross"] - gross)
+            quantity = min(quantity, remaining_gross / risk_price)
+            if account:
+                available = min(dec(account["availableBalance"]), calculation_capital)
+                margin_rate = dec(1) / dec(order_leverage) + dec("0.002")
+                quantity = min(quantity, available / (risk_price * margin_rate))
+            quantity = self.exchange.quantity(rule, quantity, price, True)
+            if account:
+                required = quantity * risk_price / order_leverage + quantity * risk_price * dec("0.002")
+                if required > available:
+                    raise ValueError("当前可用余额不足（已按余额缩量并预留费用）")
                 self.check_stopped()
                 self.exchange.prepare(e["symbol"], order_leverage, tradfi=tradfi)
+        else:
+            quantity = self.exchange.quantity(rule, quantity, price, False)
         pending = {"event": e, "key": key, "symbol": e["symbol"], "operation": e["operation"],
             "quantity": str(quantity), "price": str(price),
             "order_side": order_side, "order_type": "MARKET",
             "limit_price": None, "time_in_force": None,
             "leverage": order_leverage if opening else None,
+            "calculation_capital": str(calculation_capital) if opening else None,
             "source_before": str(source_before) if not opening else None,
             "client_id": "cc_" + hashlib.sha256((self.c["mode"] + e["event_id"]).encode()).hexdigest()[:28]}
         self.check_stopped()
@@ -995,6 +1010,7 @@ class Engine:
         self.record(p["event"], "filled" if quantity else "rejected", note,
                     quantity=str(quantity), price=str(price), client_id=p["client_id"], exchange_status=status,
                     local_leverage=p.get("leverage"),
+                    calculation_capital=p.get("calculation_capital"),
                     order_type=p.get("order_type", "MARKET"), limit_price=p.get("limit_price"),
                     **extras)
         self.s["pending"] = None
@@ -1117,7 +1133,12 @@ class Engine:
             source_stale = not self.source.get("updated") or not -10 <= age(self.source["updated"]) <= self.c["source_age"]
         except (ValueError, TypeError):
             source_stale = True
-        return {"mode": self.c["mode"], "capital": str(self.c["capital"]), "multiplier": str(self.c["multiplier"]),
+        account_equity = self.account.get("margin_balance")
+        calculation_capital = self.c["capital"]
+        if self.c["mode"] != "paper" and account_equity not in (None, ""):
+            calculation_capital = min(dec(account_equity), self.c["capital"])
+        return {"mode": self.c["mode"], "capital": str(self.c["capital"]),
+            "calculation_capital": str(calculation_capital), "multiplier": str(self.c["multiplier"]),
             "opening_order": "MARKET", "closing_order": "MARKET reduceOnly",
             "max_gross": str(self.c["max_gross"]), "leverage": self.c["leverage"], "source": self.source,
             "account": self.account, "live_positions": self.live_positions,

@@ -10,13 +10,10 @@ setup_remote_ssh
 rsync_to -avz -e "$RSYNC_RSH" \
   "$ROOT/collect.py" "$ROOT/requirements-collector.txt" \
   "${TARGET}:${REMOTE_DIR}/"
-rsync_to -avz -e "$RSYNC_RSH" \
-  "$ROOT/scripts/Dockerfile.collector" \
-  "${TARGET}:${REMOTE_DIR}/scripts/Dockerfile.collector"
 
 unit_tmp="$(mktemp)"
 sed "s|/opt/copycat|${REMOTE_DIR}|g" \
-  "$ROOT/scripts/systemd/copycat-collector.docker.service" >"$unit_tmp"
+  "$ROOT/scripts/systemd/copycat-collector.service" >"$unit_tmp"
 rsync_to -avz -e "$RSYNC_RSH" "$unit_tmp" \
   "${TARGET}:${REMOTE_DIR}/scripts/systemd/copycat-collector.service"
 rm -f "$unit_tmp"
@@ -33,8 +30,21 @@ if grep -q '^SOURCE_POLL_HARD_TIMEOUT_SECONDS=' .env; then
 else
   echo 'SOURCE_POLL_HARD_TIMEOUT_SECONDS=120' >> .env
 fi
-docker build -t copycat-collector:latest -f scripts/Dockerfile.collector .
+if grep -q '^SOURCE_POLL_SECONDS=' .env; then
+  sed -i 's/^SOURCE_POLL_SECONDS=.*/SOURCE_POLL_SECONDS=5/' .env
+else
+  echo 'SOURCE_POLL_SECONDS=5' >> .env
+fi
+if grep -q '^SOURCE_DETAIL_POLL_SECONDS=' .env; then
+  sed -i 's/^SOURCE_DETAIL_POLL_SECONDS=.*/SOURCE_DETAIL_POLL_SECONDS=60/' .env
+else
+  echo 'SOURCE_DETAIL_POLL_SECONDS=60' >> .env
+fi
+.venv/bin/python -m pip install -q -r requirements-collector.txt
 cp scripts/systemd/copycat-collector.service /etc/systemd/system/copycat-collector.service
 systemctl daemon-reload
 systemctl restart copycat-collector.service
+if command -v docker >/dev/null 2>&1 && docker inspect copycat-collector >/dev/null 2>&1; then
+  docker rm -f copycat-collector >/dev/null
+fi
 systemctl --no-pager --full status copycat-collector.service | head -20"
