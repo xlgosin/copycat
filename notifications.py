@@ -102,7 +102,7 @@ def message(mode, kind, event, note, mode_capital, portfolio=None):
         lines.extend((f"- **交易操作**　{action}", f"- **计算本金**　`{capital} USDT`"))
     for key, label in (("quantity","本次成交数量"),("price","成交价格"),("client_id","订单编号"),
                        ("order_type","订单类型"),("limit_price","委托限价"),
-                       ("source_time","跟单人成交时间"),("source_price","跟单人成交价格"),
+                       ("source_time","熬鹰成交时间"),("source_price","熬鹰成交价格"),
                        ("source_quantity","源成交数量"),("source_close_percent","源平仓占比%"),
                        ("local_close_percent","本地平仓占比%"),
                        ("local_leverage","本地杠杆"),
