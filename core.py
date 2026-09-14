@@ -900,7 +900,9 @@ class Engine:
         order_side = "BUY" if (e["side"] == "LONG") == opening else "SELL"
         if opening:
             tradfi = Binance.is_tradfi(rule)
-            order_leverage = max(self.c["leverage"], 20) if tradfi else self.c["leverage"]
+            # Binance subaccounts reject TradFi leverage above 5x. Keep TradFi
+            # at 5x independently of the configurable crypto leverage.
+            order_leverage = 5 if tradfi else self.c["leverage"]
             account = self.exchange.validate_account() if self.c["mode"] != "paper" else None
             current_equity = dec(account["totalMarginBalance"]) if account else self.c["capital"]
             calculation_capital = min(current_equity, self.c["capital"])
