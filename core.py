@@ -685,8 +685,11 @@ class Engine:
         for p in self.exchange.positions():
             q = dec(p["positionAmt"])
             if q:
-                if p["positionSide"] != "BOTH" or p.get("marginType") != "isolated":
-                    raise ValueError("检测到双向/非逐仓持仓，停止跟单")
+                margin_type = str(p.get("marginType") or "").lower()
+                rule = self.exchange.market_rule(p["symbol"])
+                expected_margin = "cross" if Binance.is_tradfi(rule) else "isolated"
+                if p["positionSide"] != "BOTH" or margin_type != expected_margin:
+                    raise ValueError("检测到双向或保证金模式异常持仓，停止跟单")
                 actual[p["symbol"] + (":LONG" if q > 0 else ":SHORT")] = abs(q)
         owned = {k: dec(v["quantity"]) for k, v in self.s["positions"].items() if dec(v["quantity"]) > 0}
         if actual != owned:
@@ -872,7 +875,12 @@ class Engine:
             except Exception as exc:
                 if self.storage_error:
                     return
-                self.s.update(running=False, error=str(exc))
+                error = str(exc)
+                previous_error = self.s.get("error")
+                self.s.update(running=False, error=error)
+                if error != previous_error:
+                    self.enqueue_notification("异常暂停", {"time": stamp()}, error)
+                self.save()
                 if self.s.get("processing") and not self.s.get("pending"):
                     self.s["review_required"] = "信号执行中断，请人工核对源记录和本系统持仓后归档账本重新初始化"
                 self.save()

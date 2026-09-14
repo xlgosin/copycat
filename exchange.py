@@ -64,7 +64,7 @@ class Binance:
             raise RuntimeError(f"币安拒绝/未确认请求 HTTP {response.status_code}，代码 {code}{suffix}")
         return body
 
-    def market(self, symbol):
+    def market_rule(self, symbol):
         if time.time() - self.rules_time > 3600:
             info = self.request("GET", "/fapi/v1/exchangeInfo")
             self.rules = {s["symbol"]: s for s in info["symbols"]}
@@ -73,6 +73,10 @@ class Binance:
         if (not rule or rule["status"] != "TRADING" or rule["quoteAsset"] != "USDT"
                 or rule.get("contractType") not in SUPPORTED_CONTRACT_TYPES):
             raise ValueError("暂不支持此合约：仅支持交易中的 USDT 加密资产或 TradFi 永续合约")
+        return rule
+
+    def market(self, symbol):
+        rule = self.market_rule(symbol)
         price = dec(self.request("GET", "/fapi/v1/premiumIndex", {"symbol": symbol})["markPrice"])
         if price <= 0:
             raise ValueError("币安价格无效")
