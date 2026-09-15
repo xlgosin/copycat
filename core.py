@@ -390,6 +390,12 @@ class Engine:
         if self.stop_requested.is_set():
             self.s["running"] = False
         error = self.s.get("error")
+        # The follower only alerts when execution is paused. Source OPEN/CLOSE
+        # notifications are owned by collect.py.
+        self.s["notifications"] = [
+            item for item in self.s.get("notifications", [])
+            if item.get("title") == "CopyCat · 异常暂停"
+        ]
         if (error and error not in SILENT_NOTIFICATION_ERRORS
                 and error != self.s.get("last_notified_error")):
             self.enqueue_notification("异常暂停", {"time": stamp()}, error)
@@ -402,14 +408,6 @@ class Engine:
                 if not (item.get("title") == "CopyCat · 异常暂停"
                         and error in item.get("text", ""))
             ]
-        pending = self.s.get("pending")
-        if pending and error and pending["client_id"] != self.s.get("last_notified_pending"):
-            event = {**pending["event"], "time": stamp(), "client_id": pending["client_id"]}
-            # Pending quantity is requested, not confirmed filled.
-            event.pop("quantity", None)
-            event.pop("price", None)
-            self.enqueue_notification("订单自动确认中", event, f"{error}；请求数量 {pending['quantity']}，系统将自动查询交易所结果，无需手动处理")
-            self.s["last_notified_pending"] = pending["client_id"]
         try:
             with self.connection() as con:
                 con.executemany("INSERT OR IGNORE INTO processed_events VALUES(?)", [(e,) for e in self.new_seen])
@@ -613,9 +611,6 @@ class Engine:
         self.s["records"].insert(0, body)
         self.new_records.append(self.s["records"][0])
         self.s["records"] = self.s["records"][:100]
-        kind = ("开仓成交" if event.get("operation") == "OPEN" else "平仓成交") if status == "filled" else "跳过订单"
-        if status in ("filled", "skipped", "rejected"):
-            self.enqueue_notification(kind, self.s["records"][0], note)
 
     def consume(self, e):
         self.new_seen.add(e["event_id"])
@@ -892,10 +887,7 @@ class Engine:
                 if self.storage_error:
                     return
                 error = str(exc)
-                previous_error = self.s.get("error")
                 self.s.update(running=False, error=error)
-                if error != previous_error:
-                    self.enqueue_notification("异常暂停", {"time": stamp()}, error)
                 self.save()
                 if self.s.get("processing") and not self.s.get("pending"):
                     self.s["review_required"] = "信号执行中断，请人工核对源记录和本系统持仓后归档账本重新初始化"

@@ -87,7 +87,7 @@ class DingTalk:
 
 
 def message(mode, kind, event, note, mode_capital, portfolio=None):
-    labels = {"paper":"模拟", "testnet":"测试网", "live":"实盘"}
+    labels = {"paper":"模拟", "testnet":"测试网", "live":"实盘", "collector":"采集器"}
     marker, direction, action = trade_style(event)
     symbol = event.get("symbol")
     heading = f"{marker} **{symbol}** · {direction} · {kind}" if symbol else f"{marker} CopyCat · {kind}"
@@ -98,8 +98,10 @@ def message(mode, kind, event, note, mode_capital, portfolio=None):
     if event.get("symbol"):
         lines.append(f"- **交易方向**　{marker} **{direction}**")
     if event.get("operation"):
-        capital = event.get("calculation_capital") or mode_capital
-        lines.extend((f"- **交易操作**　{action}", f"- **计算本金**　`{capital} USDT`"))
+        lines.append(f"- **交易操作**　{action}")
+        if mode != "collector":
+            capital = event.get("calculation_capital") or mode_capital
+            lines.append(f"- **计算本金**　`{capital} USDT`")
     for key, label in (("quantity","本次成交数量"),("price","成交价格"),("client_id","订单编号"),
                        ("order_type","订单类型"),("limit_price","委托限价"),
                        ("source_time","熬鹰成交时间"),("source_price","熬鹰成交价格"),

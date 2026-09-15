@@ -15,6 +15,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 import requests
 
+from notifications import DingTalk, message, notification_config
+
 ROOT = Path(__file__).resolve().parent
 BASE = "https://www.binance.com/bapi/futures/v1/friendly/future/copy-trade/"
 SHANGHAI = timezone(timedelta(hours=8))
@@ -167,11 +169,59 @@ def initialize(path):
         CREATE TABLE IF NOT EXISTS runtime_state(key TEXT PRIMARY KEY,value_json TEXT,updated_at TEXT);
         CREATE TABLE IF NOT EXISTS trade_events(event_id TEXT PRIMARY KEY,portfolio_id TEXT,occurred_at TEXT,
           symbol TEXT,side TEXT,operation TEXT,quantity REAL,price REAL,realized_profit REAL);
+        CREATE TABLE IF NOT EXISTS collector_notification_queue(
+          event_id TEXT PRIMARY KEY,body TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
+          next_try REAL NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS trade_events_portfolio_time ON trade_events(portfolio_id,occurred_at,event_id);
         """)
         columns = {row[1] for row in con.execute("PRAGMA table_info(trade_events)")}
         if "realized_profit" not in columns:
             con.execute("ALTER TABLE trade_events ADD COLUMN realized_profit REAL")
+
+
+def enable_source_notifications(path, portfolio):
+    """Enable notifications without replaying a pre-existing trade history."""
+    key = "collector_notifications_initialized:" + portfolio
+    with sqlite3.connect(path) as con:
+        initialized = con.execute("SELECT 1 FROM runtime_state WHERE key=?", (key,)).fetchone()
+        existing = con.execute("SELECT 1 FROM trade_events WHERE portfolio_id=? LIMIT 1", (portfolio,)).fetchone()
+        if not initialized and existing:
+            now = datetime.now(timezone.utc).isoformat()
+            con.execute("INSERT INTO runtime_state VALUES(?,?,?)", (key, json.dumps(True), now))
+
+
+def source_notification_item(event, portfolio):
+    kind = "开仓成交" if event["operation"] == "OPEN" else "平仓成交"
+    details = {"symbol": event["symbol"], "side": event["side"], "operation": event["operation"],
+               "time": event["occurred_at"], "source_time": event["occurred_at"],
+               "source_quantity": event["quantity"], "source_price": event["price"]}
+    text = message("collector", kind, details, "采集器发现熬鹰成交", "—", portfolio)
+    return {"title": f"CopyCat · 熬鹰{kind}",
+            "text": text + f"\n\n---\n> 通知编号　`{event['event_id'][:20]}`"}
+
+
+def deliver_source_notification(path, notifier):
+    """Deliver one due source-trade notification without interrupting collection."""
+    if not notifier.enabled:
+        return
+    with sqlite3.connect(path) as con:
+        row = con.execute("SELECT event_id,body,attempts FROM collector_notification_queue "
+                          "WHERE next_try<=? ORDER BY rowid LIMIT 1", (time.time(),)).fetchone()
+    if not row:
+        return
+    event_id, body, attempts = row
+    try:
+        notifier.send(json.loads(body))
+    except Exception:
+        attempts += 1
+        delay = min(300, 5 * (2 ** min(attempts - 1, 6)))
+        with sqlite3.connect(path) as con:
+            con.execute("UPDATE collector_notification_queue SET attempts=?,next_try=? WHERE event_id=?",
+                        (attempts, time.time() + delay, event_id))
+        print(f"熬鹰成交通知发送失败，{delay}秒后重试", flush=True)
+    else:
+        with sqlite3.connect(path) as con:
+            con.execute("DELETE FROM collector_notification_queue WHERE event_id=?", (event_id,))
 
 
 def fetch_detail(session, portfolio):
@@ -189,7 +239,7 @@ def fetch_detail(session, portfolio):
             "aum": aum, "captured_at": datetime.now(timezone.utc).isoformat()}
 
 
-def poll(session, path, portfolio, detail=None):
+def poll(session, path, portfolio, detail=None, notifier=None):
     with sqlite3.connect(path) as con:
         previous = con.execute("SELECT value_json FROM runtime_state WHERE key=?", ("collector_status:" + portfolio,)).fetchone()
     previous = json.loads(previous[0]) if previous else {}
@@ -254,19 +304,28 @@ def poll(session, path, portfolio, detail=None):
         profile["position_baseline"] = baseline
     window_start = previous.get("history_window_start") or coverage_start.isoformat()
     with sqlite3.connect(path) as con:
+        notification_key = "collector_notifications_initialized:" + portfolio
+        notification_ready = con.execute("SELECT 1 FROM runtime_state WHERE key=?",
+                                         (notification_key,)).fetchone() is not None
         for e in events:
             old = con.execute("SELECT quantity,price FROM trade_events WHERE event_id=?", (e["event_id"],)).fetchone()
             if old and (old[0] != e["quantity"] or old[1] != e["price"]):
                 raise ValueError("已记录订单的累计成交发生变化，请人工核查")
-            con.execute("INSERT OR IGNORE INTO trade_events "
+            inserted = con.execute("INSERT OR IGNORE INTO trade_events "
                         "(event_id,portfolio_id,occurred_at,symbol,side,operation,quantity,price,realized_profit) "
                         "VALUES(:event_id,:portfolio_id,:occurred_at,:symbol,:side,:operation,:quantity,:price,:realized_profit)", e)
+            if inserted.rowcount and notification_ready and notifier and notifier.enabled:
+                con.execute("INSERT OR IGNORE INTO collector_notification_queue(event_id,body) VALUES(?,?)",
+                            (e["event_id"], json.dumps(source_notification_item(e, portfolio))))
         con.execute("INSERT OR REPLACE INTO trader_state VALUES(?,?,?)", (portfolio,json.dumps(profile),completed))
         con.execute("INSERT OR REPLACE INTO runtime_state VALUES(?,?,?)",
                     ("collector_status:"+portfolio,json.dumps({"last_success_at": completed, "last_error":None,
                      "history_complete": False,
                      "history_window_start": window_start,
                      "history_window_end": end.isoformat()}),completed))
+        if not notification_ready:
+            con.execute("INSERT OR REPLACE INTO runtime_state VALUES(?,?,?)",
+                        (notification_key, json.dumps(True), completed))
     print(f"{completed} 熬鹰余额 {equity} USDT，读取 {len(events)} 条历史", flush=True)
 
 
@@ -282,6 +341,8 @@ if __name__ == "__main__":
     portfolio = os.getenv("PORTFOLIO_ID", "5075281354358777856")
     if not portfolio.isdigit():
         raise SystemExit("交易员ID无效")
+    notifier = DingTalk(notification_config())
+    enable_source_notifications(path, portfolio)
     collector_started = time.time()
     restart_after = max(60, int(os.getenv("SOURCE_RESTART_AFTER_SECONDS", "60")))
     poll_timeout = max(60, int(os.getenv("SOURCE_POLL_HARD_TIMEOUT_SECONDS", "120")))
@@ -298,7 +359,8 @@ if __name__ == "__main__":
             if detail is None or time.monotonic() >= detail_next_at:
                 detail = fetch_detail(session, portfolio)
                 detail_next_at = time.monotonic() + detail_interval
-            poll(session,path,portfolio,detail)
+            poll(session,path,portfolio,detail,notifier)
+            deliver_source_notification(path, notifier)
         except Exception as exc:
             updated = datetime.now(timezone.utc).isoformat()
             wait = max(15, int(os.getenv("SOURCE_FAILURE_WAIT_SECONDS", "30")))
