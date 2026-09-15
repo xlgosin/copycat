@@ -8,7 +8,7 @@ load_deploy_env
 setup_remote_ssh
 
 rsync_to -avz -e "$RSYNC_RSH" \
-  "$ROOT/collect.py" "$ROOT/requirements-collector.txt" \
+  "$ROOT/collect.py" "$ROOT/notifications.py" "$ROOT/requirements-collector.txt" \
   "${TARGET}:${REMOTE_DIR}/"
 
 unit_tmp="$(mktemp)"

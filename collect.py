@@ -193,7 +193,7 @@ def enable_source_notifications(path, portfolio):
 def source_notification_item(event, portfolio):
     kind = "开仓成交" if event["operation"] == "OPEN" else "平仓成交"
     details = {"symbol": event["symbol"], "side": event["side"], "operation": event["operation"],
-               "time": event["occurred_at"], "source_time": event["occurred_at"],
+               "time": datetime.now(timezone.utc).isoformat(), "source_time": event["occurred_at"],
                "source_quantity": event["quantity"], "source_price": event["price"]}
     text = message("collector", kind, details, "采集器发现熬鹰成交", "—", portfolio)
     return {"title": f"CopyCat · 熬鹰{kind}",
