@@ -49,6 +49,13 @@ SOURCE_HEALTH_ERRORS = (
     "带单账户金额已过期，暂停跟单",
 )
 
+# These conditions already have a dedicated pending-order recovery path.  Keep
+# the safety pause visible in the UI, but do not page the operator as though the
+# recovery needed manual intervention.
+SILENT_NOTIFICATION_ERRORS = frozenset({
+    "成交回报无效，系统将继续查询交易所结果",
+})
+
 
 def fmt_dec(value, places=None):
     value = dec(value)
@@ -383,9 +390,18 @@ class Engine:
         if self.stop_requested.is_set():
             self.s["running"] = False
         error = self.s.get("error")
-        if error and error != self.s.get("last_notified_error"):
+        if (error and error not in SILENT_NOTIFICATION_ERRORS
+                and error != self.s.get("last_notified_error")):
             self.enqueue_notification("异常暂停", {"time": stamp()}, error)
         self.s["last_notified_error"] = error
+        # Drop this notification if it was queued by an older version but has
+        # not been delivered yet.
+        if error in SILENT_NOTIFICATION_ERRORS:
+            self.s["notifications"] = [
+                item for item in self.s.get("notifications", [])
+                if not (item.get("title") == "CopyCat · 异常暂停"
+                        and error in item.get("text", ""))
+            ]
         pending = self.s.get("pending")
         if pending and error and pending["client_id"] != self.s.get("last_notified_pending"):
             event = {**pending["event"], "time": stamp(), "client_id": pending["client_id"]}
