@@ -1058,8 +1058,7 @@ class Engine:
             return False
 
     def manual_close(self, key=None):
-        """Pause copying and close one or all CopyCat-owned positions."""
-        self.stop()
+        """Close one or all CopyCat-owned positions without changing copy state."""
         with self.lock:
             if self.s.get("pending"):
                 raise ValueError("仍有订单结果正在自动确认，请稍后再平仓")
@@ -1090,9 +1089,6 @@ class Engine:
                 self.save()
                 result = self.paper_result(pending) if self.c["mode"] == "paper" else self.exchange.order(pending)
                 self.settle(result)
-                if dec(self.s["source_positions"].get(name, 0)) > 0 and name not in self.s["blocked_cycles"]:
-                    self.s["blocked_cycles"].append(name)
-                    self.save()
                 closed += 1
             return closed
 

@@ -9,7 +9,7 @@
 <section><div class="sectionhead"><div><h2>运行控制</h2><p id="credentials">等待连接状态</p></div><div class="actions"><button id="start">开始跟单</button><button id="stop" class="secondary">暂停全部跟单</button></div></div><p class="hint">暂停不会平仓，也不会继续自动跟平仓。首次启动只接收新信号，启动前已有源仓位等待归零后再参与。金额低于最小订单时跳过。结果暂不确定的订单会按订单号自动查询，无需手动核对。</p><div id="error" role="alert" hidden></div></section>
 <nav><button class="tab active" data-tab="positions">我的持仓</button><button class="tab" data-tab="orders">跟单记录</button><button class="tab" data-tab="strategy">策略说明</button></nav>
 <p class="hint">开仓/平仓均使用市价单；平仓带 reduceOnly。可能有滑点，不再按源成交价限价、也不再因价格偏离跳过开仓。</p>
-<section id="positions" class="panel"><div class="sectionhead"><div><h2>CopyCat 跟单持仓</h2><small id="pnl"></small></div><button id="closeAll" class="danger" hidden>全部平仓</button></div><div id="positionList" class="cards"></div><p class="hint">显示本系统成交账本；实盘每轮核对交易所仓位。手动平仓会先暂停自动跟单，并用 reduceOnly 市价单关闭本系统持仓。</p></section>
+<section id="positions" class="panel"><div class="sectionhead"><div><h2>CopyCat 跟单持仓</h2><small id="pnl"></small></div><button id="closeAll" class="danger" hidden>全部平仓</button></div><div id="positionList" class="cards"></div><p class="hint">显示本系统成交账本；实盘每轮核对交易所仓位。手动平仓使用 reduceOnly 市价单关闭本系统持仓，不会改变自动跟单状态。</p></section>
 <section id="orders" class="panel" hidden><div class="sectionhead"><div><h2>跟单记录</h2><p id="recordHint">第 1 页 · 每页 5 条</p></div><div class="record-filters" id="recordFilters"><button type="button" class="record-filter active" data-kind="trade">跟单</button><button type="button" class="record-filter" data-kind="system">系统</button><button type="button" class="record-filter" data-kind="all">全部</button></div></div><div id="orderList" class="cards"></div><div class="actions"><button id="latest" class="secondary" disabled>上一页</button><button id="older" class="secondary">下一页</button></div></section>
 <section id="strategy" class="panel" hidden><h2>动态本金如何跟随熬鹰</h2><p class="formula">跟单数量 = 源开仓数量 × 当前账户权益（不超过预算上限）÷ 源带单账户余额 × 跟单倍率</p><p>计算结果还会按当前可用余额、预留费用和剩余敞口向下缩量。账户盈利时最多仍按预算上限计算；亏损后会自动使用较低的当前权益。</p><p>平仓数量 = 我的该方向剩余仓位 × 源平仓数量 ÷ 源平仓前推算仓位。全部平仓最多关闭自己跟出的数量。单向模式下，同一币种反向开仓会跳过。</p><p>跟单倍率与合约杠杆分开配置。源账户余额使用带单保证金余额；AUM含跟单资金，不作为比例分母。</p><p>交易源：独立 Binance HTTP 采集器，每5秒读取本地源数据库。延迟信号、接口失败、持仓不一致会暂停执行。</p><p id="aum"></p><p>公开记录可能缺失；市价成交价格和源订单不同。预算上限不是保证亏损上限，请使用独立合约账户。</p></section>
 </div><p id="message" role="status"></p><footer>CopyCat · Python + HTML · <a href="https://www.binance.com/zh-TC/copy-trading/lead-details/5075281354358777856" target="_blank" rel="noreferrer">熬鹰币安页面 ↗</a></footer>
@@ -55,7 +55,7 @@
     <p class="live-eyebrow">REDUCE ONLY</p>
     <h2 id="closeTitle">确认手动平仓</h2>
     <p id="closeSummary"></p>
-    <p class="live-error">操作会先暂停自动跟单，并按市价成交，可能有滑点。</p>
+    <p class="live-error">操作不会改变自动跟单状态，并按市价成交，可能有滑点。</p>
     <div class="live-actions">
       <button type="submit" value="cancel" class="secondary">取消</button>
       <button type="submit" value="confirm" id="closeOk" class="danger">确认平仓</button>
