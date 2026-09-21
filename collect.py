@@ -20,6 +20,7 @@ from notifications import DingTalk, message, notification_config
 ROOT = Path(__file__).resolve().parent
 BASE = "https://www.binance.com/bapi/futures/v1/friendly/future/copy-trade/"
 SHANGHAI = timezone(timedelta(hours=8))
+SOURCE_NOTIFICATION_FRESH_SECONDS = 10 * 60
 
 
 def poll_watchdog(timeout):
@@ -197,31 +198,98 @@ def source_notification_item(event, portfolio):
                "source_quantity": event["quantity"], "source_price": event["price"]}
     text = message("collector", kind, details, "采集器发现熬鹰成交", "—", portfolio)
     return {"title": f"CopyCat · 熬鹰{kind}",
-            "text": text + f"\n\n---\n> 通知编号　`{event['event_id'][:20]}`"}
+            "text": text + f"\n\n---\n> 通知编号　`{event['event_id'][:20]}`",
+            # DingTalk ignores this private field. Keeping the source facts in
+            # the persistent queue lets delivery merge notifications that
+            # arrive late or become stale during webhook retries.
+            "source_event": {key: event[key] for key in
+                             ("event_id", "occurred_at", "symbol", "side", "operation",
+                              "quantity", "price")}}
 
 
-def deliver_source_notification(path, notifier):
-    """Deliver one due source-trade notification without interrupting collection."""
+def _source_event_time(item):
+    try:
+        value = item["source_event"]["occurred_at"]
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def merged_source_notification(rows, now=None):
+    """Build one compact notice for source trades discovered over 10 minutes late."""
+    now = time.time() if now is None else now
+    events = [item["source_event"] for _, item, _ in rows]
+    groups = {}
+    for event in events:
+        key = (event["symbol"], event["side"], event["operation"])
+        group = groups.setdefault(key, {"quantity": 0.0, "quote": 0.0, "count": 0})
+        quantity = float(event["quantity"])
+        group["quantity"] += quantity
+        group["quote"] += quantity * float(event["price"])
+        group["count"] += 1
+    source_times = sorted(datetime.fromtimestamp(_source_event_time(item), timezone.utc)
+                          for _, item, _ in rows)
+    notified_at = datetime.fromtimestamp(now, SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
+    lines = ["### 🟠 **熬鹰历史成交合并通知**",
+             "> **CopyCat · 熬鹰跟单**　|　采集器", "",
+             f"- **通知时间**　{notified_at} (UTC+8)",
+             f"- **合并成交数**　`{len(events)}`",
+             f"- **源成交时间范围**　`{source_times[0].astimezone(SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')} 至 "
+             f"{source_times[-1].astimezone(SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)`", ""]
+    for (symbol, side, operation), group in groups.items():
+        marker, direction = {"LONG": ("🟢", "多单"), "SHORT": ("🔴", "空单")}.get(
+            side, ("🔵", side))
+        action = {"OPEN": "开仓", "CLOSE": "平仓"}.get(operation, operation)
+        average = group["quote"] / group["quantity"]
+        lines.append(f"- {marker} **{symbol} · {direction} · {action}**："
+                     f"`{group['count']} 笔`，合计数量 `{group['quantity']:.8g}`，加权均价 `{average:.8g}`")
+    digest = hashlib.sha256("|".join(row[0] for row in rows).encode()).hexdigest()[:20]
+    lines.extend(("", "> **说明**　源成交距通知已超过10分钟，采集器已合并通知，避免迟到成交逐条刷屏。",
+                  "", "---", f"> 通知编号　`{digest}`"))
+    return {"title": f"CopyCat · {len(events)}笔历史成交合并通知", "text": "\n".join(lines)}
+
+
+def deliver_source_notification(path, notifier, now=None):
+    """Send a fresh trade immediately, or merge all due trades older than 10 minutes."""
     if not notifier.enabled:
         return
+    now = time.time() if now is None else now
     with sqlite3.connect(path) as con:
-        row = con.execute("SELECT event_id,body,attempts FROM collector_notification_queue "
-                          "WHERE next_try<=? ORDER BY rowid LIMIT 1", (time.time(),)).fetchone()
-    if not row:
+        queued = con.execute("SELECT event_id,body,attempts FROM collector_notification_queue "
+                             "WHERE next_try<=? ORDER BY rowid", (now,)).fetchall()
+    if not queued:
         return
-    event_id, body, attempts = row
+    decoded = [(event_id, json.loads(body), attempts) for event_id, body, attempts in queued]
+    fresh = []
+    for row in decoded:
+        occurred_at = _source_event_time(row[1])
+        if occurred_at is None or now - occurred_at <= SOURCE_NOTIFICATION_FRESH_SECONDS:
+            fresh.append(row)
+    if fresh:
+        rows = fresh[:1]
+        outbound = rows[0][1]
+    else:
+        rows = decoded
+        outbound = merged_source_notification(rows, now)
     try:
-        notifier.send(json.loads(body))
+        notifier.send(outbound)
     except Exception:
-        attempts += 1
-        delay = min(300, 5 * (2 ** min(attempts - 1, 6)))
+        delays = []
         with sqlite3.connect(path) as con:
-            con.execute("UPDATE collector_notification_queue SET attempts=?,next_try=? WHERE event_id=?",
-                        (attempts, time.time() + delay, event_id))
-        print(f"熬鹰成交通知发送失败，{delay}秒后重试", flush=True)
+            for event_id, _, attempts in rows:
+                attempts += 1
+                delay = min(300, 5 * (2 ** min(attempts - 1, 6)))
+                delays.append(delay)
+                con.execute("UPDATE collector_notification_queue SET attempts=?,next_try=? WHERE event_id=?",
+                            (attempts, time.time() + delay, event_id))
+        print(f"熬鹰成交通知发送失败，{max(delays)}秒后重试", flush=True)
     else:
         with sqlite3.connect(path) as con:
-            con.execute("DELETE FROM collector_notification_queue WHERE event_id=?", (event_id,))
+            con.executemany("DELETE FROM collector_notification_queue WHERE event_id=?",
+                            [(event_id,) for event_id, _, _ in rows])
 
 
 def fetch_detail(session, portfolio):
