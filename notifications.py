@@ -32,6 +32,11 @@ def format_time(value):
         return str(value)
 
 
+def trader_brand(name, watch_only=False):
+    """Label a lead as copied or watched; names come from env, not hardcoded."""
+    return f"{name or '带单员'}观察" if watch_only else f"{name or '带单员'}跟单"
+
+
 def trade_style(event):
     side = event.get("side")
     operation = event.get("operation")
@@ -86,13 +91,18 @@ class DingTalk:
             raise ValueError("钉钉网络请求失败，通知等待重试") from None
 
 
-def message(mode, kind, event, note, mode_capital, portfolio=None):
+def message(mode, kind, event, note, mode_capital, portfolio=None, trader=None,
+            watch_only=None):
     labels = {"paper":"模拟", "testnet":"测试网", "live":"实盘", "collector":"采集器"}
     marker, direction, action = trade_style(event)
     symbol = event.get("symbol")
+    trader = trader or event.get("trader") or "带单员"
+    if watch_only is None:
+        watch_only = bool(event.get("watch_only"))
+    brand = trader_brand(trader, watch_only)
     heading = f"{marker} **{symbol}** · {direction} · {kind}" if symbol else f"{marker} CopyCat · {kind}"
     lines = [f"### {heading}",
-             f"> **CopyCat · 熬鹰跟单**　|　{labels.get(mode, mode)}",
+             f"> **CopyCat · {brand}**　|　{labels.get(mode, mode)}",
              "",
              f"- **通知时间**　{format_time(event.get('time') or event.get('occurred_at'))}"]
     if event.get("symbol"):

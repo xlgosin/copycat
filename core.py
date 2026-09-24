@@ -15,6 +15,7 @@ from notifications import DingTalk, message
 
 
 ROOT = Path(__file__).resolve().parent
+ORDER_FEE_RESERVE_RATE = dec("0.005")
 
 
 def stamp():
@@ -941,11 +942,12 @@ class Engine:
             quantity = min(quantity, remaining_gross / risk_price)
             if account:
                 available = min(dec(account["availableBalance"]), calculation_capital)
-                margin_rate = dec(1) / dec(order_leverage) + dec("0.002")
+                margin_rate = dec(1) / dec(order_leverage) + ORDER_FEE_RESERVE_RATE
                 quantity = min(quantity, available / (risk_price * margin_rate))
             quantity = self.exchange.quantity(rule, quantity, price, True)
             if account:
-                required = quantity * risk_price / order_leverage + quantity * risk_price * dec("0.002")
+                required = (quantity * risk_price / order_leverage
+                            + quantity * risk_price * ORDER_FEE_RESERVE_RATE)
                 if required > available:
                     raise ValueError("当前可用余额不足（已按余额缩量并预留费用）")
                 self.check_stopped()

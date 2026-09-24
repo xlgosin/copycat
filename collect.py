@@ -15,12 +15,52 @@ from pathlib import Path
 from dotenv import load_dotenv
 import requests
 
-from notifications import DingTalk, message, notification_config
+from collections import namedtuple
+
+from notifications import DingTalk, message, notification_config, trader_brand
 
 ROOT = Path(__file__).resolve().parent
 BASE = "https://www.binance.com/bapi/futures/v1/friendly/future/copy-trade/"
 SHANGHAI = timezone(timedelta(hours=8))
-SOURCE_NOTIFICATION_FRESH_SECONDS = 10 * 60
+SOURCE_NOTIFICATION_FRESH_SECONDS = 5 * 60
+Source = namedtuple("Source", "portfolio name watch_only")
+
+
+def parse_named_portfolios(raw):
+    """Parse `id:name,id:name` lists. Semicolons and extra spaces are ignored."""
+    items = []
+    seen = set()
+    for part in (raw or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        portfolio, _, name = part.partition(":")
+        portfolio = portfolio.strip()
+        name = name.strip() or portfolio
+        if not portfolio.isdigit():
+            raise SystemExit(f"交易员ID无效: {portfolio}")
+        if portfolio in seen:
+            continue
+        seen.add(portfolio)
+        items.append((portfolio, name))
+    return items
+
+
+def load_sources(env=None):
+    """Copy source first, then any number of notify-only watch sources."""
+    env = os.environ if env is None else env
+    copy_id = (env.get("PORTFOLIO_ID") or "5075281354358777856").strip()
+    if not copy_id.isdigit():
+        raise SystemExit("跟单交易员ID无效")
+    copy_name = (env.get("PORTFOLIO_NAME") or "熬鹰").strip() or "熬鹰"
+    sources = [Source(copy_id, copy_name, False)]
+    seen = {copy_id}
+    for portfolio, name in parse_named_portfolios(env.get("WATCH_PORTFOLIOS", "")):
+        if portfolio in seen:
+            continue
+        seen.add(portfolio)
+        sources.append(Source(portfolio, name, True))
+    return sources
 
 
 def poll_watchdog(timeout):
@@ -191,20 +231,24 @@ def enable_source_notifications(path, portfolio):
             con.execute("INSERT INTO runtime_state VALUES(?,?,?)", (key, json.dumps(True), now))
 
 
-def source_notification_item(event, portfolio):
+def source_notification_item(event, portfolio, trader=None, watch_only=False):
+    trader = (trader or event.get("trader") or "").strip() or "带单员"
     kind = "开仓成交" if event["operation"] == "OPEN" else "平仓成交"
     details = {"symbol": event["symbol"], "side": event["side"], "operation": event["operation"],
                "time": datetime.now(timezone.utc).isoformat(), "source_time": event["occurred_at"],
-               "source_quantity": event["quantity"], "source_price": event["price"]}
-    text = message("collector", kind, details, "采集器发现熬鹰成交", "—", portfolio)
-    return {"title": f"CopyCat · 熬鹰{kind}",
+               "source_quantity": event["quantity"], "source_price": event["price"],
+               "trader": trader, "watch_only": watch_only}
+    text = message("collector", kind, details, f"采集器发现{trader}成交", "—", portfolio,
+                   trader=trader, watch_only=watch_only)
+    return {"title": f"CopyCat · {trader}{kind}",
             "text": text + f"\n\n---\n> 通知编号　`{event['event_id'][:20]}`",
             # DingTalk ignores this private field. Keeping the source facts in
             # the persistent queue lets delivery merge notifications that
             # arrive late or become stale during webhook retries.
             "source_event": {key: event[key] for key in
                              ("event_id", "occurred_at", "symbol", "side", "operation",
-                              "quantity", "price")}}
+                              "quantity", "price")} | {
+                "trader": trader, "portfolio_id": portfolio, "watch_only": watch_only}}
 
 
 def _source_event_time(item):
@@ -218,8 +262,18 @@ def _source_event_time(item):
         return None
 
 
-def merged_source_notification(rows, now=None):
-    """Build one compact notice for source trades discovered over 10 minutes late."""
+def _item_group(item):
+    event = item.get("source_event") or {}
+    return event.get("portfolio_id") or event.get("trader") or ""
+
+
+def _item_meta(item):
+    event = item.get("source_event") or {}
+    return event.get("trader") or "带单员", bool(event.get("watch_only"))
+
+
+def merged_source_notification(rows, now=None, stale=True, trader="带单员", watch_only=False):
+    """Build one compact notice for a batch of source trades."""
     now = time.time() if now is None else now
     events = [item["source_event"] for _, item, _ in rows]
     groups = {}
@@ -233,8 +287,9 @@ def merged_source_notification(rows, now=None):
     source_times = sorted(datetime.fromtimestamp(_source_event_time(item), timezone.utc)
                           for _, item, _ in rows)
     notified_at = datetime.fromtimestamp(now, SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
-    lines = ["### 🟠 **熬鹰历史成交合并通知**",
-             "> **CopyCat · 熬鹰跟单**　|　采集器", "",
+    heading = f"{trader}历史成交合并通知" if stale else f"{trader}成交批量通知"
+    lines = [f"### 🟠 **{heading}**",
+             f"> **CopyCat · {trader_brand(trader, watch_only)}**　|　采集器", "",
              f"- **通知时间**　{notified_at} (UTC+8)",
              f"- **合并成交数**　`{len(events)}`",
              f"- **源成交时间范围**　`{source_times[0].astimezone(SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')} 至 "
@@ -247,33 +302,65 @@ def merged_source_notification(rows, now=None):
         lines.append(f"- {marker} **{symbol} · {direction} · {action}**："
                      f"`{group['count']} 笔`，合计数量 `{group['quantity']:.8g}`，加权均价 `{average:.8g}`")
     digest = hashlib.sha256("|".join(row[0] for row in rows).encode()).hexdigest()[:20]
-    lines.extend(("", "> **说明**　源成交距通知已超过10分钟，采集器已合并通知，避免迟到成交逐条刷屏。",
+    note = ("源成交距通知已超过5分钟，采集器已合并通知，避免迟到成交逐条刷屏。" if stale else
+            "采集器同时发现多笔同批成交，已及时合并通知，避免拆分成交逐条刷屏。")
+    lines.extend(("", f"> **说明**　{note}",
                   "", "---", f"> 通知编号　`{digest}`"))
-    return {"title": f"CopyCat · {len(events)}笔历史成交合并通知", "text": "\n".join(lines)}
+    label = "历史成交合并通知" if stale else "成交批量通知"
+    return {"title": f"CopyCat · {len(events)}笔{label}", "text": "\n".join(lines)}
 
 
 def deliver_source_notification(path, notifier, now=None):
-    """Send a fresh trade immediately, or merge all due trades older than 10 minutes."""
+    """Send a fresh trade immediately, or merge all due trades older than 5 minutes."""
     if not notifier.enabled:
         return
     now = time.time() if now is None else now
     with sqlite3.connect(path) as con:
-        queued = con.execute("SELECT event_id,body,attempts FROM collector_notification_queue "
-                             "WHERE next_try<=? ORDER BY rowid", (now,)).fetchall()
+        queued = con.execute("""
+            SELECT q.event_id,q.body,q.attempts,
+                   t.occurred_at,t.symbol,t.side,t.operation,t.quantity,t.price,t.portfolio_id
+            FROM collector_notification_queue q
+            LEFT JOIN trade_events t ON t.event_id=q.event_id
+            WHERE q.next_try<=? ORDER BY q.rowid
+        """, (now,)).fetchall()
     if not queued:
         return
-    decoded = [(event_id, json.loads(body), attempts) for event_id, body, attempts in queued]
-    fresh = []
+    decoded = []
+    for event_id, body, attempts, occurred_at, symbol, side, operation, quantity, price, portfolio_id in queued:
+        item = json.loads(body)
+        # Queues written before the late-notification feature contain only the
+        # rendered Markdown. Rehydrate their source facts from trade_events so
+        # an old deployment backlog is merged instead of leaking out one by one.
+        if "source_event" not in item and occurred_at is not None:
+            item["source_event"] = {"event_id": event_id, "occurred_at": occurred_at,
+                                    "symbol": symbol, "side": side, "operation": operation,
+                                    "quantity": quantity, "price": price,
+                                    "portfolio_id": portfolio_id}
+        elif portfolio_id and not (item.get("source_event") or {}).get("portfolio_id"):
+            item.setdefault("source_event", {})["portfolio_id"] = portfolio_id
+        decoded.append((event_id, item, attempts))
+    by_source = {}
+    for row in decoded:
+        by_source.setdefault(_item_group(row[1]), []).append(row)
+    decoded = next(iter(by_source.values()))
+    trader, watch_only = _item_meta(decoded[0][1])
+    stale = []
     for row in decoded:
         occurred_at = _source_event_time(row[1])
-        if occurred_at is None or now - occurred_at <= SOURCE_NOTIFICATION_FRESH_SECONDS:
-            fresh.append(row)
-    if fresh:
-        rows = fresh[:1]
-        outbound = rows[0][1]
-    else:
+        if occurred_at is not None and now - occurred_at > SOURCE_NOTIFICATION_FRESH_SECONDS:
+            stale.append(row)
+    # Drain the old backlog first. Otherwise a continuous stream of recent
+    # trades can keep stale rows behind it forever and leak them one per poll.
+    if stale:
+        rows = stale
+        outbound = merged_source_notification(rows, now, trader=trader, watch_only=watch_only)
+    elif len(decoded) > 1:
         rows = decoded
-        outbound = merged_source_notification(rows, now)
+        outbound = merged_source_notification(rows, now, stale=False, trader=trader,
+                                              watch_only=watch_only)
+    else:
+        rows = decoded[:1]
+        outbound = rows[0][1]
     try:
         notifier.send(outbound)
     except Exception:
@@ -285,7 +372,7 @@ def deliver_source_notification(path, notifier, now=None):
                 delays.append(delay)
                 con.execute("UPDATE collector_notification_queue SET attempts=?,next_try=? WHERE event_id=?",
                             (attempts, time.time() + delay, event_id))
-        print(f"熬鹰成交通知发送失败，{max(delays)}秒后重试", flush=True)
+        print(f"{trader}成交通知发送失败，{max(delays)}秒后重试", flush=True)
     else:
         with sqlite3.connect(path) as con:
             con.executemany("DELETE FROM collector_notification_queue WHERE event_id=?",
@@ -307,16 +394,21 @@ def fetch_detail(session, portfolio):
             "aum": aum, "captured_at": datetime.now(timezone.utc).isoformat()}
 
 
-def poll(session, path, portfolio, detail=None, notifier=None):
+def poll(session, path, portfolio, detail=None, notifier=None, trader="",
+         watch_only=False):
     with sqlite3.connect(path) as con:
         previous = con.execute("SELECT value_json FROM runtime_state WHERE key=?", ("collector_status:" + portfolio,)).fetchone()
     previous = json.loads(previous[0]) if previous else {}
-    detail = detail or fetch_detail(session, portfolio)
-    equity = detail["margin_balance"]
+    if watch_only:
+        detail = detail or {"name": trader, "margin_balance": None, "aum": None,
+                            "captured_at": datetime.now(timezone.utc).isoformat(), "watch_only": True}
+    else:
+        detail = detail or fetch_detail(session, portfolio)
+    equity = detail.get("margin_balance")
     now = datetime.now(SHANGHAI)
     coverage_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     baseline = None
-    baseline_path = os.getenv("SOURCE_BASELINE_FILE", "").strip()
+    baseline_path = "" if watch_only else os.getenv("SOURCE_BASELINE_FILE", "").strip()
     if baseline_path:
         baseline_file = Path(baseline_path)
         if not baseline_file.is_absolute():
@@ -384,7 +476,8 @@ def poll(session, path, portfolio, detail=None, notifier=None):
                         "VALUES(:event_id,:portfolio_id,:occurred_at,:symbol,:side,:operation,:quantity,:price,:realized_profit)", e)
             if inserted.rowcount and notification_ready and notifier and notifier.enabled:
                 con.execute("INSERT OR IGNORE INTO collector_notification_queue(event_id,body) VALUES(?,?)",
-                            (e["event_id"], json.dumps(source_notification_item(e, portfolio))))
+                            (e["event_id"], json.dumps(source_notification_item(
+                                e, portfolio, trader, watch_only))))
         con.execute("INSERT OR REPLACE INTO trader_state VALUES(?,?,?)", (portfolio,json.dumps(profile),completed))
         con.execute("INSERT OR REPLACE INTO runtime_state VALUES(?,?,?)",
                     ("collector_status:"+portfolio,json.dumps({"last_success_at": completed, "last_error":None,
@@ -394,7 +487,10 @@ def poll(session, path, portfolio, detail=None, notifier=None):
         if not notification_ready:
             con.execute("INSERT OR REPLACE INTO runtime_state VALUES(?,?,?)",
                         (notification_key, json.dumps(True), completed))
-    print(f"{completed} 熬鹰余额 {equity} USDT，读取 {len(events)} 条历史", flush=True)
+    if watch_only:
+        print(f"{completed} {trader} 读取 {len(events)} 条成交", flush=True)
+    else:
+        print(f"{completed} {trader}余额 {equity} USDT，读取 {len(events)} 条历史", flush=True)
 
 
 if __name__ == "__main__":
@@ -406,14 +502,18 @@ if __name__ == "__main__":
     if not path.is_absolute():
         path = ROOT / path
     initialize(path)
-    portfolio = os.getenv("PORTFOLIO_ID", "5075281354358777856")
-    if not portfolio.isdigit():
-        raise SystemExit("交易员ID无效")
+    sources = load_sources()
+    copy = next(source for source in sources if not source.watch_only)
+    watches = [source for source in sources if source.watch_only]
+    print("采集源: " + "、".join(
+        f"{source.name}（{'观察' if source.watch_only else '跟单'}）" for source in sources), flush=True)
     notifier = DingTalk(notification_config())
-    enable_source_notifications(path, portfolio)
+    for source in sources:
+        enable_source_notifications(path, source.portfolio)
     collector_started = time.time()
     restart_after = max(60, int(os.getenv("SOURCE_RESTART_AFTER_SECONDS", "60")))
     poll_timeout = max(60, int(os.getenv("SOURCE_POLL_HARD_TIMEOUT_SECONDS", "120")))
+    poll_timeout += max(0, len(sources) - 1) * 60
     session = requests.Session()
     session.headers.update({"Accept": "application/json", "Content-Type": "application/json",
                             "User-Agent": "CopyCat/1.0"})
@@ -424,30 +524,43 @@ if __name__ == "__main__":
         watchdog = poll_watchdog(poll_timeout)
         next_delay = max(5, int(os.getenv("SOURCE_POLL_SECONDS", "60")))
         try:
-            if detail is None or time.monotonic() >= detail_next_at:
-                detail = fetch_detail(session, portfolio)
-                detail_next_at = time.monotonic() + detail_interval
-            poll(session,path,portfolio,detail,notifier)
-            deliver_source_notification(path, notifier)
-        except Exception as exc:
-            updated = datetime.now(timezone.utc).isoformat()
-            wait = max(15, int(os.getenv("SOURCE_FAILURE_WAIT_SECONDS", "30")))
-            print(f"{updated} 采集失败: {type(exc).__name__}，等待{wait}秒；检查公开接口是否可访问", flush=True)
-            with sqlite3.connect(path) as con:
-                previous = con.execute("SELECT value_json FROM runtime_state WHERE key=?", ("collector_status:"+portfolio,)).fetchone()
-                status = json.loads(previous[0]) if previous else {}
-                status["last_error"] = "独立公开接口采集失败"
-                con.execute("INSERT OR REPLACE INTO runtime_state VALUES(?,?,?)",
-                    ("collector_status:"+portfolio,json.dumps(status),updated))
-            if args.once:
-                print(str(exc)[:300], flush=True)
-                raise SystemExit(1)
-            if restart_due(status.get("last_success_at"), collector_started, restart_after):
-                print(f"连续{restart_after}秒未成功采集，退出并交由 systemd 重启", flush=True)
-                os._exit(2)
-            next_delay = wait
+            try:
+                if detail is None or time.monotonic() >= detail_next_at:
+                    detail = fetch_detail(session, copy.portfolio)
+                    detail_next_at = time.monotonic() + detail_interval
+                poll(session, path, copy.portfolio, detail, notifier, trader=copy.name)
+            except Exception as exc:
+                updated = datetime.now(timezone.utc).isoformat()
+                wait = max(15, int(os.getenv("SOURCE_FAILURE_WAIT_SECONDS", "30")))
+                print(f"{updated} {copy.name}采集失败: {type(exc).__name__}，等待{wait}秒；检查公开接口是否可访问", flush=True)
+                with sqlite3.connect(path) as con:
+                    previous = con.execute("SELECT value_json FROM runtime_state WHERE key=?",
+                                          ("collector_status:"+copy.portfolio,)).fetchone()
+                    status = json.loads(previous[0]) if previous else {}
+                    status["last_error"] = "独立公开接口采集失败"
+                    con.execute("INSERT OR REPLACE INTO runtime_state VALUES(?,?,?)",
+                        ("collector_status:"+copy.portfolio,json.dumps(status),updated))
+                if args.once:
+                    print(str(exc)[:300], flush=True)
+                    raise SystemExit(1)
+                if restart_due(status.get("last_success_at"), collector_started, restart_after):
+                    print(f"连续{restart_after}秒未成功采集，退出并交由 systemd 重启", flush=True)
+                    os._exit(2)
+                next_delay = wait
+            for source in watches:
+                try:
+                    poll(session, path, source.portfolio, None, notifier,
+                         trader=source.name, watch_only=True)
+                except Exception as exc:
+                    updated = datetime.now(timezone.utc).isoformat()
+                    print(f"{updated} {source.name}采集失败: {type(exc).__name__}，不影响跟单源", flush=True)
+                    print(str(exc)[:300], flush=True)
         finally:
             watchdog.cancel()
+        try:
+            deliver_source_notification(path, notifier)
+        except Exception as exc:
+            print(f"成交通知发送异常: {type(exc).__name__}", flush=True)
         if args.once:
             break
         time.sleep(next_delay)
